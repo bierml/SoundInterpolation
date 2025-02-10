@@ -57,8 +57,8 @@ def read_wav_as_float(file_path):
     return float_data.tolist()
 
 # Example usage
-wav_file_path = 'one_16khz.wav'  # Replace with the path to your WAV file
-wav_file_path1 = 'one_c_16khz.wav'
+wav_file_path = '1_16khz.wav'  # Replace with the path to your WAV file
+wav_file_path1 = '1c_16khz.wav'
 samples = read_wav_as_float(wav_file_path)
 samples1 = read_wav_as_float(wav_file_path1)
 
@@ -109,6 +109,35 @@ while j < len(samples1):
         samples_sequences_clipped.append(samples1[j:j+SQNC_LENGTH])
     j += SQNC_LENGTH
 
+"""Определение функций для расчета STFT (из них будут конструироваться лямбда-слои нейросети)."""
+
+import numpy as np
+import tensorflow as tf
+import matplotlib.pyplot as plt
+from scipy.signal import stft, istft
+sample_rate = 16000
+N, M = 5, 65  # Spectrogram dimensions
+def stftLayer(x):
+  #shape of the result is (a,b) where a = frame_length//2+1 and b = ceil(N//a), N - number of samples in original sequence
+  frame_length = 8  # Frame length (number of samples per frame)
+  frame_step = frame_length//2  # Step between frames (overlap)
+  _, _, spctr = stft(np.array(x), sample_rate, nperseg=frame_length, noverlap=frame_step)
+  ampsp = np.abs(spctr)
+  phssp = tf.math.angle(spctr)
+  return [ampsp,phssp]
+def istftLayer(x):
+  #shape of the result is (a,b) where a = frame_length//2+1 and b = ceil(N//a), N - number of samples in original sequence
+  frame_length = 8  # Frame length (number of samples per frame)
+  frame_step = frame_length//2  # Step between frames (overlap)
+  spctrgrm = np.empty((N,M))
+  spctrgrm = x[0]*np.exp(1j*x[1].numpy())
+  _, x = istft(spctrgrm, sample_rate, nperseg=frame_length, noverlap=frame_step)
+  return x
+vect = np.random.rand(100)
+print(vect)
+print(istftLayer(stftLayer(vect)))
+print(np.allclose(vect,istftLayer(stftLayer(vect))))
+
 """Заполнение массива спектрограмм сигнала. Zxx - амплитудная спектрограмма последовательностей исходного сигнала, Zxx1 - амплитудная спектрограмма последовательностей сигнала с клиппингом. phs и phs1 - соответствующие фазовые спектрограмма последовательностей"""
 
 import numpy as np
@@ -143,7 +172,7 @@ for i in range(len(samples_sequences_clipped)):
 from tensorflow.keras import layers, models
 from tensorflow.keras import Model
 from tensorflow.keras import layers, models
-from tensorflow.keras.layers import Normalization
+from tensorflow.keras.layers import Normalization, Lambda
 import numpy as np
 from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.callbacks import LearningRateScheduler
@@ -159,7 +188,7 @@ def generate_identity_dataset(num_samples=1000):
     X = np.random.rand(num_samples, N, M)
     return X, X
 
-def build_rnn_spectrogram_model(N, M):
+'''def build_rnn_spectrogram_model(N, M):
     input_shape = (N, M, 1)  # Input shape for spectrograms
 
     input_tensor = layers.Input(shape=input_shape)
@@ -178,17 +207,45 @@ def build_rnn_spectrogram_model(N, M):
 
     #model.compile(optimizer=Adam(learning_rate=0.001), loss='mean_squared_error', metrics=['mse'])
     model.compile(optimizer=Adam(learning_rate=0.001), loss='mean_absolute_error', metrics=['mae'])
+    return model'''
+
+def build_rnn_spectrogram_model(sq_lngth):
+    input_shape = (sq_lngth)  # Input shape for spectrograms
+
+    input_tensor = layers.Input(shape=(sq_lngth,))
+    mag = Lambda(stftLayer,output_shape=(N,M))(input_tensor)[0].reshape((1,N,M,1))
+    print(mag.shape)
+    #.reshape((N,M,1))
+    angle = Lambda(stftLayer,output_shape=(N,M))(input_tensor)[1].reshape((1,N,M,1))
+    mag = layers.Conv2D(filters=64, kernel_size=(3, 3), activation='relu', padding='same')(mag)
+    mag = layers.Conv2D(filters=64, kernel_size=(3, 3), activation='relu', padding='same')(mag)
+    mag = layers.Reshape((N, M * 64))(mag)
+    mag = layers.SimpleRNN(units=256, activation='relu', return_sequences=True)(mag)
+    mag = layers.SimpleRNN(units=128, activation='relu', return_sequences=True)(mag)
+    mag = layers.Dense(M, activation='linear')(mag)
+    mag = layers.Reshape((N, M, 1))(mag)
+
+
+    # Add residual connection
+    #output_tensor = layers.Multiply()([input_tensor, mag])
+    output_tensor = mag
+    result = Lambda(istftLayer,output_shape=(sq_lngth,))(output_tensor,angle)
+    model = Model(inputs=input_tensor, outputs=result)
+
+    #model.compile(optimizer=Adam(learning_rate=0.001), loss='mean_squared_error', metrics=['mse'])
+    model.compile(optimizer=Adam(learning_rate=0.001), loss='mean_absolute_error', metrics=['mae'],run_eagerly=True)
     return model
 
 from tensorflow.keras.callbacks import EarlyStopping
 
 
-model = build_rnn_spectrogram_model(N, M)
+model = build_rnn_spectrogram_model(SQNC_LENGTH)
 model.summary()
 early_stopping = EarlyStopping(monitor='loss', patience=40, restore_best_weights=True)
-print(np.array(Zxx1).shape)
+#print(np.array(Zxx1).shape)
 # Train model with normalized data
-model.fit(np.array(Zxx1), np.array(Zxx) , epochs=1000, callbacks=[early_stopping])
+#model.fit(np.array(Zxx1), np.array(Zxx) , epochs=1000, callbacks=[early_stopping])
+model.fit(np.array(samples_sequences_clipped), np.array(samples_sequences), epochs=1000, callbacks=[early_stopping])
 
 """Открытие файла который нужно восстановить и получение массива его спектрограмм. file_for_restoration_path - путь к файлу который нужно восстановить.
 samples_input_sequences - массив семплов этого файла
