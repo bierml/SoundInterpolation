@@ -109,356 +109,7 @@ while j < len(samples1):
         samples_sequences_clipped.append(samples1[j:j+SQNC_LENGTH])
     j += SQNC_LENGTH
 
-"""Определение функций для расчета STFT (из них будут конструироваться лямбда-слои нейросети)."""
-
-import numpy as np
-import tensorflow as tf
-import matplotlib.pyplot as plt
-from scipy.signal import stft, istft
-sample_rate = 16000
-N, M = 5, 65  # Spectrogram dimensions
-def stftLayer(x):
-  #shape of the result is (a,b) where a = frame_length//2+1 and b = ceil(N//a), N - number of samples in original sequence
-  frame_length = 8  # Frame length (number of samples per frame)
-  frame_step = frame_length//2  # Step between frames (overlap)
-  _, _, spctr = stft(np.array(x), sample_rate, nperseg=frame_length, noverlap=frame_step)
-  ampsp = np.abs(spctr)
-  phssp = tf.math.angle(spctr)
-  return [ampsp,phssp]
-def istftLayer(x):
-  #shape of the result is (a,b) where a = frame_length//2+1 and b = ceil(N//a), N - number of samples in original sequence
-  frame_length = 8  # Frame length (number of samples per frame)
-  frame_step = frame_length//2  # Step between frames (overlap)
-  spctrgrm = np.empty((N,M))
-  spctrgrm = x[0]*np.exp(1j*x[1].numpy())
-  _, x = istft(spctrgrm, sample_rate, nperseg=frame_length, noverlap=frame_step)
-  return x
-vect = np.random.rand(256)
-print(vect)
-print(istftLayer(stftLayer(vect)))
-print(np.allclose(vect,istftLayer(stftLayer(vect))))
-
-blockLen = 8
-block_shift = blockLen//2
-def stftLayer(x):
-    '''
-    Method for an STFT helper layer used with a Lambda layer. The layer
-    calculates the STFT on the last dimension and returns the magnitude and
-    phase of the STFT.
-    '''
-
-    # creating frames from the continuous waveform
-    frames = tf.signal.frame(x, blockLen, block_shift)
-    # calculating the fft over the time frames. rfft returns NFFT/2+1 bins.
-    stft_dat = tf.signal.rfft(frames)
-    # calculating magnitude and phase from the complex signal
-    mag = tf.abs(stft_dat)
-    phase = tf.math.angle(stft_dat)
-    # returning magnitude and phase as list
-    return [mag, phase]
-def ifftLayer(x):
-    '''
-    Method for an inverse FFT layer used with an Lambda layer. This layer
-    calculates time domain frames from magnitude and phase information.
-    As input x a list with [mag,phase] is required.
-    '''
-
-    # calculating the complex representation
-    s1_stft = (tf.cast(x[0].reshape((1,N,M,1)), tf.complex64) *
-                tf.exp( (1j * tf.cast(x[1], tf.complex64))))
-    # returning the time domain frames
-    return tf.signal.irfft(s1_stft)
-vect = np.random.rand(256)
-#print(len(vect[0]))
-#print(len(vect[1]))
-print(vect)
-#print(istftLayer(stftLayer(vect)))
-#print(np.allclose(vect,istftLayer(stftLayer(vect))))
-
-"""Заполнение массива спектрограмм сигнала. Zxx - амплитудная спектрограмма последовательностей исходного сигнала, Zxx1 - амплитудная спектрограмма последовательностей сигнала с клиппингом. phs и phs1 - соответствующие фазовые спектрограмма последовательностей"""
-
-import numpy as np
-import tensorflow as tf
-import matplotlib.pyplot as plt
-from scipy.signal import stft, istft
-Zxx = []
-Zxx1 = []
-phs = []
-phs1 = []
-fs = 16000
-t = np.linspace(0, 1.0, SQNC_LENGTH, endpoint=False)  # Time vector
-for i in range(len(samples_sequences_clipped)):
-  signal = samples_sequences[i]
-  signal1 = samples_sequences_clipped[i]
-  # Parameters for STFT
-
-  #shape of the result is (a,b) where a = frame_length//2+1 and b = ceil(N//a), N - number of samples in original sequence
-  frame_length = 8  # Frame length (number of samples per frame)
-  frame_step = frame_length//2  # Step between frames (overlap)
-
-  # Compute the STFT using scipy's stft function
-  f, t_stft, Z = stft(signal, fs, nperseg=frame_length, noverlap=frame_step)
-  f1, t_stft1, Z1 = stft(signal1, fs, nperseg=frame_length, noverlap=frame_step)
-  Zxx.append(np.abs(Z))
-  Zxx1.append(np.abs(Z1))
-  phs.append(tf.math.angle(Z))
-  phs1.append(tf.math.angle(Z1))
-
 """Обучение нейросети на множестве спектрограмм сигнала. N и M - количество точек по осям частоты и времени соответственно в обучающих выборках."""
-
-from tensorflow.keras import layers, models
-from tensorflow.keras import Model
-from tensorflow.keras import layers, models
-from tensorflow.keras.layers import Normalization, Lambda
-import numpy as np
-from tensorflow.keras.optimizers import Adam
-from tensorflow.keras.callbacks import LearningRateScheduler
-BSIZE = 32
-N, M = 5, 65  # Spectrogram dimensions
-class AddDim(layers.Layer):
-    def call(self, x):
-        return tf.expand_dims(x, axis=-1)
-class Squeeze(layers.Layer):
-    def call(self, x):
-        return tf.squeeze(x, axis=-1)
-def scheduler(epoch, lr):
-    if epoch < 50:
-        return lr
-    else:
-        return lr * 0.95
-
-lr_scheduler = LearningRateScheduler(scheduler)
-def generate_identity_dataset(num_samples=1000):
-    X = np.random.rand(num_samples, N, M)
-    return X, X
-
-def build_rnn_spectrogram_model(sq_lngth):
-    # Input: a 1D signal of length sq_lngth (batch dimension preserved)
-    input_tensor = tf.keras.layers.Input(shape=(sq_lngth,))
-
-    # STFT layer; let the output shape include the batch dimension
-    mag = tf.keras.layers.Lambda(
-        stftLayer, output_shape=lambda s: (s[0], N, M)
-    )(input_tensor)[0]
-    phase = tf.keras.layers.Lambda(
-        stftLayer, output_shape=lambda s: (s[0], N, M)
-    )(input_tensor)[1]
-    # Add a channel dimension without losing the batch dimension
-    #.reshape((1,N,M,1))
-    mag = AddDim()(mag).reshape((BSIZE,N,M,1))   # shape: (batch, N, M, 1)
-    #.reshape((1,N,M,1))
-    phase = AddDim()(phase).reshape((BSIZE,N,M,1)) # shape: (batch, N, M, 1)
-
-    # Convolutional and RNN processing
-    mag = tf.keras.layers.Conv2D(filters=64, kernel_size=(3, 3), activation='relu', padding='same')(mag)
-    mag = tf.keras.layers.Conv2D(filters=64, kernel_size=(3, 3), activation='relu', padding='same')(mag)
-    # Reshape to combine the last two dimensions for RNN
-    mag = tf.keras.layers.Reshape((N, M * 64))(mag)
-    mag = tf.keras.layers.SimpleRNN(units=256, activation='relu', return_sequences=True)(mag)
-    mag = tf.keras.layers.SimpleRNN(units=128, activation='relu', return_sequences=True)(mag)
-    mag = tf.keras.layers.Dense(M, activation='linear')(mag)
-    # Reshape back to (batch, N, M)
-    mag = tf.keras.layers.Reshape((N, M))(mag)
-
-    # Inverse STFT layer expects mag and phase of shape (batch, N, M)
-    # If needed, squeeze extra dims from phase (or ensure phase is (batch, N, M))
-    #phase = tf.squeeze(phase, axis=-1)  # shape: (batch, N, M)
-    phase = Squeeze()(phase)
-    # ISTFT layer to reconstruct the time-domain signal; output shape (batch, sq_lngth)
-    #lambda s: (s[0], sq_lngth)
-    output_signal = tf.keras.layers.Lambda(
-        istftLayer, output_shape=((N,M))
-    )([mag, phase])
-
-    model = tf.keras.models.Model(inputs=input_tensor, outputs=output_signal)
-    model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=0.001),
-                  loss='mean_absolute_error',
-                  metrics=['mae'],
-                  run_eagerly=True)
-    return model
-
-
-
-'''def build_rnn_spectrogram_model(sq_lngth):
-    # Input: a 1D signal of length sq_lngth.
-    input_tensor = tf.keras.layers.Input(shape=(sq_lngth,))
-
-    # STFT layer (wrapped in a Lambda)
-    #mag, phase = tf.keras.layers.Lambda(stftLayer, output_shape=(N, M)) (input_tensor)
-    mag = tf.keras.layers.Lambda(stftLayer, output_shape=(N, M))(input_tensor)[0]
-    #print(mag.shape)
-    phase = tf.keras.layers.Lambda(stftLayer, output_shape=(N, M))(input_tensor)[1]
-    # (You may need to add a channel dimension if required by Conv2D.)
-    mag = MyLayer()(mag)
-    phase = MyLayer()(phase)
-    #mag = MyLayer()(mag).reshape((1,N,M,1))
-    #phase = MyLayer()(phase).reshape((1,N,M,1))
-    #mag = tf.expand_dims(mag, axis=-1)   # shape: (batch, N, M, 1)
-    #phase = tf.expand_dims(phase, axis=-1)
-
-    # Your convolutional and RNN processing here…
-    mag = tf.keras.layers.Conv2D(filters=64, kernel_size=(3, 3), activation='relu', padding='same')(mag)
-    mag = tf.keras.layers.Conv2D(filters=64, kernel_size=(3, 3), activation='relu', padding='same')(mag)
-    mag = tf.keras.layers.Reshape((N, M * 64))(mag)
-    mag = tf.keras.layers.SimpleRNN(units=256, activation='relu', return_sequences=True)(mag)
-    mag = tf.keras.layers.SimpleRNN(units=128, activation='relu', return_sequences=True)(mag)
-    mag = tf.keras.layers.Dense(M, activation='linear')(mag)
-    mag = tf.keras.layers.Reshape((1, N, M, 1))(mag)  # Remove extra dimensions if added earlier
-
-    # Inverse STFT layer: reconstruct the time-domain signal
-    output_signal = tf.keras.layers.Lambda(istftLayer, output_shape=(sq_lngth,))([mag, phase])
-
-    model = tf.keras.models.Model(inputs=input_tensor, outputs=output_signal)
-    model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=0.001),
-                  loss='mean_absolute_error',
-                  metrics=['mae'],
-                  run_eagerly=True)
-    return model'''
-
-
-from tensorflow.keras.callbacks import EarlyStopping
-
-
-model = build_rnn_spectrogram_model(SQNC_LENGTH)
-model.summary()
-early_stopping = EarlyStopping(monitor='loss', patience=40, restore_best_weights=True)
-#print(np.array(Zxx1).shape)
-# Train model with normalized data
-#model.fit(np.array(Zxx1), np.array(Zxx) , epochs=1000, callbacks=[early_stopping])
-model.fit(np.array(samples_sequences_clipped), np.array(samples_sequences), batch_size=BSIZE, epochs=1000, callbacks=[early_stopping])
-
-import tensorflow as tf
-
-# Custom STFT layer using tf.signal.stft
-class STFTLayer(tf.keras.layers.Layer):
-    def __init__(self, frame_length=8, frame_step=4, **kwargs):
-        super(STFTLayer, self).__init__(**kwargs)
-        self.frame_length = frame_length
-        self.frame_step = frame_step
-
-    def call(self, inputs):
-        # inputs: shape (batch, sq_lngth)
-        # Use a Hann window
-        window = tf.signal.hann_window(self.frame_length, dtype=inputs.dtype)
-        stft_result = tf.signal.stft(
-            inputs,
-            frame_length=self.frame_length,
-            frame_step=self.frame_step,
-            window_fn=lambda frame_length, dtype: window
-        )
-        magnitude = tf.abs(stft_result)
-        phase = tf.math.angle(stft_result)
-        return magnitude, phase
-
-    def compute_output_shape(self, input_shape):
-        batch = input_shape[0]
-        if input_shape[1] is None:
-            return (batch, None, None), (batch, None, None)
-        time_frames = (input_shape[1] - self.frame_length) // self.frame_step + 1
-        return (batch, self.frame_length // 2 + 1, time_frames), (batch, self.frame_length // 2 + 1, time_frames)
-
-
-# Custom inverse STFT layer using tf.signal.inverse_stft
-class ISTFTLayer(tf.keras.layers.Layer):
-    def __init__(self, frame_length=8, frame_step=4, sq_lngth=None, **kwargs):
-        super(ISTFTLayer, self).__init__(**kwargs)
-        self.frame_length = frame_length
-        self.frame_step = frame_step
-        self.sq_lngth = sq_lngth
-
-    def call(self, inputs):
-        # inputs: a list [mag, phase] with shapes (batch, F, T) each (F = frame_length//2+1)
-        mag, phase = inputs
-        stft_complex = tf.cast(mag, tf.complex64) * tf.exp(1j * tf.cast(phase, tf.complex64))
-        window = tf.signal.hann_window(self.frame_length, dtype=tf.float32)
-        reconstructed = tf.signal.inverse_stft(
-            stft_complex,
-            frame_length=self.frame_length,
-            frame_step=self.frame_step,
-            window_fn=lambda frame_length, dtype: window
-        )
-        # Optionally crop to the desired signal length
-        if self.sq_lngth is not None:
-            reconstructed = reconstructed[:, :self.sq_lngth]
-        return reconstructed
-
-    def compute_output_shape(self, input_shape):
-        batch = input_shape[0][0]
-        if self.sq_lngth is not None:
-            return (batch, self.sq_lngth)
-        else:
-            return (batch, None)
-
-
-
-class AddInnerDim(layers.Layer):
-    def call(self, x):
-        return tf.expand_dims(x, axis=-1)
-class Squeeze(layers.Layer):
-    def call(self, x):
-        return tf.squeeze(x, axis=-1)
-
-# Updated model-building function using differentiable STFT/ISTFT
-def build_rnn_spectrogram_model(sq_lngth):
-    # Define input: a 1D signal of length sq_lngth (batch dimension preserved)
-    input_tensor = tf.keras.layers.Input(shape=(sq_lngth,))  # shape: (batch, sq_lngth)
-
-    # Compute the STFT using our custom layer.
-    # This returns magnitude and phase of shape (batch, F, T), where F = frame_length//2+1.
-    stft_layer = STFTLayer(frame_length=8, frame_step=4)
-    mag, phase = stft_layer(input_tensor)  # shapes: (batch, 5, T)
-
-    # For consistency with your previous code, assume you want a fixed T = M.
-    # Compute M as:
-    M_const = (sq_lngth - 8) // 4 + 1
-    # Crop (or pad, if needed) to exactly M_const time frames:
-    mag = mag[:, :, :M_const]
-    phase = phase[:, :, :M_const]
-
-    # Add a channel dimension (for Conv2D) while preserving the batch size.
-    mag = AddInnerDim()(mag)
-    phase = AddInnerDim()(phase)
-    #mag = tf.expand_dims(mag, axis=-1)    # shape: (batch, 5, M_const, 1)
-    #phase = tf.expand_dims(phase, axis=-1)  # shape: (batch, 5, M_const, 1)
-
-    # Process magnitude with 2D convolutions.
-    x = tf.keras.layers.Conv2D(filters=64, kernel_size=(3, 3), activation='relu', padding='same')(mag)
-    x = tf.keras.layers.Conv2D(filters=64, kernel_size=(3, 3), activation='relu', padding='same')(x)
-    # Now x has shape (batch, 5, M_const, 64)
-
-    # Reshape for RNN processing.
-    # In your original code, you treated the first spatial dimension (of size 5) as timesteps.
-    # Flatten the remaining spatial dimensions into features:
-    x = tf.keras.layers.Reshape((5, M_const * 64))(x)  # shape: (batch, 5, M_const*64)
-
-    # Process with two SimpleRNN layers.
-    x = tf.keras.layers.SimpleRNN(units=256, activation='relu', return_sequences=True)(x)
-    x = tf.keras.layers.SimpleRNN(units=128, activation='relu', return_sequences=True)(x)
-
-    # Map each of the 5 timesteps to M_const outputs via a Dense layer.
-    x = tf.keras.layers.Dense(units=M_const, activation='linear')(x)  # shape: (batch, 5, M_const)
-
-    # Now x represents the processed magnitude spectrogram (shape: (batch, 5, M_const)).
-    # Squeeze the phase (remove the extra channel dimension) so that it becomes (batch, 5, M_const)
-    #phase = tf.squeeze(phase, axis=-1)
-    phase = Squeeze()(phase)
-
-    # Use the ISTFT layer to reconstruct the time-domain signal.
-    istft_layer = ISTFTLayer(frame_length=8, frame_step=4, sq_lngth=sq_lngth)
-    output_signal = istft_layer([x, phase])  # shape: (batch, sq_lngth)
-
-    model = tf.keras.models.Model(inputs=input_tensor, outputs=output_signal)
-    model.compile(
-        optimizer=tf.keras.optimizers.Adam(learning_rate=0.001),
-        loss='mean_absolute_error',
-        metrics=['mae']
-    )
-    return model
-model = build_rnn_spectrogram_model(SQNC_LENGTH)
-model.summary()
-#print(np.array(samples_sequences_clipped).shape)
-#print(np.array(samples_sequences).shape)
-model.fit(np.array(samples_sequences_clipped), np.array(samples_sequences), epochs=1000, callbacks=[early_stopping])
 
 import tensorflow as tf
 
@@ -574,8 +225,9 @@ def build_rnn_spectrogram_model(sq_lngth):
 
     # Process with two SimpleRNN layers.
     x = tf.keras.layers.SimpleRNN(units=256, activation='relu', return_sequences=True)(x)
-    x = tf.keras.layers.SimpleRNN(units=128, activation='relu', return_sequences=True)(x)
-
+    '''x = tf.keras.layers.SimpleRNN(units=128, activation='relu', return_sequences=True)(x)
+    x = tf.keras.layers.SimpleRNN(units=64, activation='relu', return_sequences=True)(x)
+    x = tf.keras.layers.SimpleRNN(units=32, activation='relu', return_sequences=True)(x)'''
     # Map each of the 5 timesteps to M_const outputs via a Dense layer.
     x = tf.keras.layers.Dense(units=M_const, activation='linear')(x)  # shape: (batch, 5, M_const)
 
@@ -653,30 +305,26 @@ for i in range(len(samples_input_sequences)):
 import cmath
 import math
 samples_restored = []
-for i in range(len(Zyy)):
-  t = np.linspace(0, 1.0, SQNC_LENGTH, endpoint=False)  # Time vector
-  #shape of the result is (a,b) where a = frame_length//2+1 and b = ceil(N//a), N - number of samples in original sequence
-  frame_length = 8  # Frame length (number of samples per frame)
-  frame_step = 4  # Step between frames (overlap)
-  spgram = np.empty((N,M))
-  spgram = model.predict(Zyy[i].reshape(1,N,M)).reshape((N,M))*np.exp(1j*phsy[i].numpy())
-  _, reconstructed_signal = istft(spgram, fs, nperseg=frame_length, noverlap=frame_step)
-  samples_restored.append(reconstructed_signal[0:SQNC_LENGTH])
-
-import cmath
-import math
-samples_restored = []
+maxv = np.max(np.array(samples_input_sequences))
+minv = np.min(np.array(samples_input_sequences))
 for i in range(len(samples_input_sequences)):
   t = np.linspace(0, 1.0, SQNC_LENGTH, endpoint=False)  # Time vector
   #shape of the result is (a,b) where a = frame_length//2+1 and b = ceil(N//a), N - number of samples in original sequence
-  vect = np.array(samples_input_sequences[i])
-  vect = np.expand_dims(vect, axis=0)
-  reconstructed = model.predict(vect)
-  samples_restored.append(reconstructed[0:SQNC_LENGTH])
+  if(len(samples_input_sequences[i])<SQNC_LENGTH):
+    break
+  if(max(samples_input_sequences[i])>(maxv*0.95) or min(samples_input_sequences[i])<(minv*0.95)):
+    vect = np.array(samples_input_sequences[i])
+    vect = np.expand_dims(vect, axis=0)
+    reconstructed = model.predict(vect,verbose=0)
+    samples_restored.append(reconstructed[0:SQNC_LENGTH])
+  else:
+    samples_restored.append(np.array(samples_input_sequences[i]))
 
 """Если мы хотим произвести сравнение с каким-либо другим методом, возможно, возникнет проблема из-за разных длин файлов: текущий алгоритм отбрасывает последние сэмплы в файле чтобы достичь количества сэмплов кратного SQNC_LENGTH. Если раскомментировать вторую строку мы получим массив в котором недостающие восстановленные сэмплы заменены сэмплами исходного массива до требуемой длины, что обеспечит возможность сравнения файлов. output_path - название файла, в который будет записан вывод программы."""
 
 samples_restored_final = samples_restored
+for i in range(len(samples_restored_final)):
+  print(type(samples_restored_final),len(samples_restored_final[i]))
 samples_restored_final = np.append(np.array(samples_restored_final).flatten(),np.array(samples_input_file[len(samples_input_file)-(len(samples_input_file) % SQNC_LENGTH)::]))
 import wave
 import numpy as np
@@ -719,35 +367,6 @@ print(f"WAV file written to {output_path}")
 import cmath
 import math
 for i in range(20,len(samples_input_sequences)):
-  fs = 44100
-  t = np.linspace(0, 1.0, SQNC_LENGTH, endpoint=False)  # Time vector
-  #shape of the result is (a,b) where a = frame_length//2+1 and b = ceil(N//a), N - number of samples in original sequence
-  frame_length = 8  # Frame length (number of samples per frame)
-  frame_step = 4  # Step between frames (overlap)
-  spgram = np.empty((N,M))
-  #for j in range(N):
-    #for k in range(M):
-  spgram=model.predict(Zyy[i].reshape(1,N,M)).reshape((N,M))*np.exp(1j*phsy[i].numpy())
-  #print(Zxx1[10]*(math.cos(phs[10])+1j*math.sin(phs[10])))
-  #print(spgram[8][2])
-  _, reconstructed_signal = istft(spgram, fs, nperseg=frame_length, noverlap=frame_step)
-
-  # Plot reconstructed signal
-  plt.subplot(2, 1, 2)
-  #plt.plot(t, samples_sequences[i], label="Original Signal", color='blue')
-  plt.plot(t, samples_input_sequences[i], label="Clipped Signal", color='green')
-  plt.plot(t, samples_restored[i], label="Reconstructed Signal", color='orange')
-  plt.title('Reconstructed Signal from Spectrogram')
-  plt.xlabel('Time [s]')
-  plt.ylabel('Amplitude')
-  plt.legend()
-
-  plt.tight_layout()
-  plt.show()
-
-import cmath
-import math
-for i in range(20,len(samples_input_sequences)):
   fs = 16000
   t = np.linspace(0, 1.0, SQNC_LENGTH, endpoint=False)  # Time vector
   plt.subplot(2, 1, 2)
@@ -762,5 +381,3 @@ for i in range(20,len(samples_input_sequences)):
 
   plt.tight_layout()
   plt.show()
-
-print(samples_input_sequences[40])
