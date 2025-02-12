@@ -600,12 +600,12 @@ def build_rnn_spectrogram_model(sq_lngth):
 # Assume SQNC_LENGTH, samples_sequences_clipped, and samples_sequences are defined.
 model = build_rnn_spectrogram_model(SQNC_LENGTH)
 model.summary()
-early_stopping = tf.keras.callbacks.EarlyStopping(monitor='loss', patience=40, restore_best_weights=True)
+early_stopping = tf.keras.callbacks.EarlyStopping(monitor='loss', patience=20, restore_best_weights=True)
 model.fit(np.array(samples_sequences_clipped), np.array(samples_sequences),
           batch_size=32, epochs=1000, callbacks=[early_stopping])
 
-vect = np.random.rand(256)
-print(vect.shape)
+vect = np.random.rand(SQNC_LENGTH)
+vect = np.expand_dims(vect, axis=0)  # Now shape is (1, SQNC_LENGTH)
 print(model.predict(vect))
 
 """Открытие файла который нужно восстановить и получение массива его спектрограмм. file_for_restoration_path - путь к файлу который нужно восстановить.
@@ -669,7 +669,9 @@ samples_restored = []
 for i in range(len(samples_input_sequences)):
   t = np.linspace(0, 1.0, SQNC_LENGTH, endpoint=False)  # Time vector
   #shape of the result is (a,b) where a = frame_length//2+1 and b = ceil(N//a), N - number of samples in original sequence
-  reconstructed = model.predict(np.array(samples_input_sequences[i]))
+  vect = np.array(samples_input_sequences[i])
+  vect = np.expand_dims(vect, axis=0)
+  reconstructed = model.predict(vect)
   samples_restored.append(reconstructed[0:SQNC_LENGTH])
 
 """Если мы хотим произвести сравнение с каким-либо другим методом, возможно, возникнет проблема из-за разных длин файлов: текущий алгоритм отбрасывает последние сэмплы в файле чтобы достичь количества сэмплов кратного SQNC_LENGTH. Если раскомментировать вторую строку мы получим массив в котором недостающие восстановленные сэмплы заменены сэмплами исходного массива до требуемой длины, что обеспечит возможность сравнения файлов. output_path - название файла, в который будет записан вывод программы."""
@@ -750,9 +752,9 @@ for i in range(20,len(samples_input_sequences)):
   t = np.linspace(0, 1.0, SQNC_LENGTH, endpoint=False)  # Time vector
   plt.subplot(2, 1, 2)
 
-  #plt.plot(t, samples_sequences[i], label="Original Signal", color='blue')
+  plt.plot(t, samples_sequences[i], label="Original Signal", color='blue')
   plt.plot(t, samples_input_sequences[i], label="Clipped Signal", color='green')
-  plt.plot(t, samples_restored[i], label="Reconstructed Signal", color='orange')
+  plt.plot(t, samples_restored[i].flatten(), label="Reconstructed Signal", color='orange')
   plt.title('Reconstructed Signal from Spectrogram')
   plt.xlabel('Time [s]')
   plt.ylabel('Amplitude')
