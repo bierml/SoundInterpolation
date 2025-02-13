@@ -57,8 +57,8 @@ def read_wav_as_float(file_path):
     return float_data.tolist()
 
 # Example usage
-wav_file_path = '1_16khz.wav'  # Replace with the path to your WAV file
-wav_file_path1 = '1c_16khz.wav'
+wav_file_path = '1.wav'  # Replace with the path to your WAV file
+wav_file_path1 = '1c.wav'
 samples = read_wav_as_float(wav_file_path)
 samples1 = read_wav_as_float(wav_file_path1)
 
@@ -103,16 +103,23 @@ j = 0
 SQNC_LENGTH = 256
 samples_sequences = []
 samples_sequences_clipped = []
+step_size = SQNC_LENGTH // 2
 while j < len(samples1):
-    if(j+SQNC_LENGTH < len(samples1)):
-        samples_sequences.append(samples[j:j+SQNC_LENGTH])
-        samples_sequences_clipped.append(samples1[j:j+SQNC_LENGTH])
-    j += SQNC_LENGTH
+    #print(j, j+SQNC_LENGTH-1)
+    if(j+step_size < len(samples1)):
+      samples_sequences.append(samples[j:j+SQNC_LENGTH])
+      samples_sequences_clipped.append(samples1[j:j+SQNC_LENGTH])
+    j += step_size
+#while j < len(samples1):
+#    if(j+SQNC_LENGTH < len(samples1)):
+#        samples_sequences.append(samples[j:j+SQNC_LENGTH])
+#        samples_sequences_clipped.append(samples1[j:j+SQNC_LENGTH])
+#    j += SQNC_LENGTH
 
 """Обучение нейросети на множестве спектрограмм сигнала. N и M - количество точек по осям частоты и времени соответственно в обучающих выборках."""
 
 import tensorflow as tf
-
+FSTEP = 16
 # Custom STFT layer using tf.signal.stft
 class STFTLayer(tf.keras.layers.Layer):
     def __init__(self, frame_length=8, frame_step=4, **kwargs):
@@ -201,12 +208,12 @@ def build_rnn_spectrogram_model(sq_lngth):
     input_tensor = tf.keras.layers.Input(shape=(sq_lngth,))  # shape: (batch, sq_lngth)
 
     # Compute the STFT using our custom layer.
-    stft_layer = STFTLayer(frame_length=8, frame_step=4)
+    stft_layer = STFTLayer(frame_length=FSTEP*2, frame_step=FSTEP)
     mag, phase = stft_layer(input_tensor)
     # Now mag and phase have shape (batch, F, T) where F = 5 and T = (sq_lngth-8)//4 + 1.
 
     # For consistency, set T = M_const:
-    M_const = (sq_lngth - 8) // 4 + 1
+    M_const = (sq_lngth - FSTEP * 2) // FSTEP + 1
     mag = mag[:, :, :M_const]   # shape: (batch, 5, M_const)
     phase = phase[:, :, :M_const]  # shape: (batch, 5, M_const)
 
@@ -221,29 +228,29 @@ def build_rnn_spectrogram_model(sq_lngth):
 
     # Reshape for RNN processing.
     # We treat the frequency dimension (5) as timesteps, and flatten the remaining dims.
-    x = tf.keras.layers.Reshape((5, M_const * 64))(x)  # shape: (batch, 5, M_const*64)
+    x = tf.keras.layers.Reshape((FSTEP + 1, M_const * 64))(x)  # shape: (batch, 5, M_const*64)
 
     # Process with two SimpleRNN layers.
-    x = tf.keras.layers.SimpleRNN(units=256, activation='relu', return_sequences=True)(x)
-    '''x = tf.keras.layers.SimpleRNN(units=128, activation='relu', return_sequences=True)(x)
-    x = tf.keras.layers.SimpleRNN(units=64, activation='relu', return_sequences=True)(x)
+    x = tf.keras.layers.SimpleRNN(units=sq_lngth, activation='relu', return_sequences=True)(x)
+    x = tf.keras.layers.SimpleRNN(units=sq_lngth//2, activation='relu', return_sequences=True)(x)
+    '''x = tf.keras.layers.SimpleRNN(units=64, activation='relu', return_sequences=True)(x)
     x = tf.keras.layers.SimpleRNN(units=32, activation='relu', return_sequences=True)(x)'''
     # Map each of the 5 timesteps to M_const outputs via a Dense layer.
     x = tf.keras.layers.Dense(units=M_const, activation='linear')(x)  # shape: (batch, 5, M_const)
-
+    #x = tf.keras.layers.Multiply()([mag.reshape(x.shape), x]).reshape(x.shape)
     # x now represents the processed magnitude spectrogram (shape: (batch, 5, M_const)).
     # For phase, remove the extra channel dimension.
     phase = Squeeze()(phase)  # shape: (batch, 5, M_const)
 
     # Use the ISTFT layer to reconstruct the time-domain signal.
-    istft_layer = ISTFTLayer(frame_length=8, frame_step=4, sq_lngth=sq_lngth)
+    istft_layer = ISTFTLayer(frame_length=FSTEP*2, frame_step=FSTEP, sq_lngth=sq_lngth)
     output_signal = istft_layer([x, phase])  # shape: (batch, sq_lngth)
 
     model = tf.keras.models.Model(inputs=input_tensor, outputs=output_signal)
     model.compile(
         optimizer=tf.keras.optimizers.Adam(learning_rate=0.001),
         loss='mean_absolute_error',
-        metrics=['mae']
+        metrics=['mse']
     )
     return model
 
@@ -266,7 +273,7 @@ samples_input_sequences - массив семплов этого файла
 Zyy,phsy - массивы амплитудных и фазовых спектрограмм файла соответственно
 """
 
-file_for_restoration_path = "1c_16khz.wav"
+file_for_restoration_path = "1c.wav"
 samples_input_file = read_wav_as_float(file_for_restoration_path)
 j = 0
 SQNC_LENGTH = 256
@@ -284,21 +291,6 @@ import wave
 # Open the WAV file
 with wave.open(file_for_restoration_path, 'rb') as wav_file:
     fs = wav_file.getframerate()
-Zyy = []
-phsy = []
-t = np.linspace(0, 1.0, SQNC_LENGTH, endpoint=False)  # Time vector
-for i in range(len(samples_input_sequences)):
-  signal = samples_input_sequences[i]
-  # Parameters for STFT
-
-  #shape of the result is (a,b) where a = frame_length//2+1 and b = ceil(N//a), N - number of samples in original sequence
-  frame_length = 8  # Frame length (number of samples per frame)
-  frame_step = frame_length//2  # Step between frames (overlap)
-
-  # Compute the STFT using scipy's stft function
-  f, t_stft, Z = stft(signal, fs, nperseg=frame_length, noverlap=frame_step)
-  Zyy.append(np.abs(Z))
-  phsy.append(tf.math.angle(Z))
 
 """Восстановление звука с помощью нейросети. samples_restored - массив восстановленных сэмплов звука."""
 
@@ -312,19 +304,70 @@ for i in range(len(samples_input_sequences)):
   #shape of the result is (a,b) where a = frame_length//2+1 and b = ceil(N//a), N - number of samples in original sequence
   if(len(samples_input_sequences[i])<SQNC_LENGTH):
     break
-  if(max(samples_input_sequences[i])>(maxv*0.95) or min(samples_input_sequences[i])<(minv*0.95)):
+  if(max(samples_input_sequences[i])>(maxv*0.98) or min(samples_input_sequences[i])<(minv*0.98)):
     vect = np.array(samples_input_sequences[i])
     vect = np.expand_dims(vect, axis=0)
     reconstructed = model.predict(vect,verbose=0)
-    samples_restored.append(reconstructed[0:SQNC_LENGTH])
+    '''reconstructed_fin = vect
+    print("i=",i)
+    for l in range(SQNC_LENGTH):
+        if((samples_input_sequences[i][l])>(maxv*0.98) or samples_input_sequences[i][l]<(minv*0.98)):
+            reconstructed_fin = reconstructed[l]'''
+    #print(reconstructed)
+    #samples_restored.append(reconstructed[0:SQNC_LENGTH])
+    samples_restored.append(reconstructed.flatten())
   else:
     samples_restored.append(np.array(samples_input_sequences[i]))
+
+"""Для правильного восстановления нужны накладывающиеся последовательности семплов исходного файла. Для простоты возьмем степень наложения окон равной 0.5."""
+
+#print(samples_restored)
+restored_samples_overlap = []
+overlap_input_sequences = []
+step_size = SQNC_LENGTH // 2
+j = 0
+maxv = np.max(np.array(samples_input_file))
+minv = np.min(np.array(samples_input_file))
+while j < len(samples_input_file):
+    #print(j, j+SQNC_LENGTH-1)
+    if(j+step_size < len(samples_input_file)):
+        overlap_input_sequences.append(samples_input_file[j:j+SQNC_LENGTH])
+    j += step_size
+for sqnc in overlap_input_sequences:
+  if(max(sqnc)>(maxv*0.95) or min(sqnc)<(minv*0.95)):
+    elem = np.array(sqnc)
+    elem = np.expand_dims(elem, axis=0)  # Now shape is (1, SQNC_LENGTH)
+    res = model.predict(elem,verbose=0).flatten()
+    #print(res[SQNC_LENGTH//4:(SQNC_LENGTH*3)//4])
+    restored_samples_overlap.append(res[SQNC_LENGTH//4:(SQNC_LENGTH*3)//4])
+  else:
+    restored_samples_overlap.append(np.array(sqnc[SQNC_LENGTH//4:(SQNC_LENGTH*3)//4]))
+
+import cmath
+import math
+for i in range(80,len(restored_samples_overlap)):
+  t = np.linspace(0, 1.0, SQNC_LENGTH//2, endpoint=False)  # Time vector
+  plt.subplot(2, 1, 2)
+
+  plt.plot(t, restored_samples_overlap[i], label="Restored Signal", color='blue')
+  plt.plot(t, overlap_input_sequences[i][SQNC_LENGTH//4:(SQNC_LENGTH*3)//4], label="Original Signal", color='red')
+  plt.title('Reconstructed Signal from Spectrogram')
+  plt.xlabel('Time [s]')
+  plt.ylabel('Amplitude')
+  plt.legend()
+
+  plt.tight_layout()
+  plt.show()
+
+restored_samples_overlap = np.array(restored_samples_overlap).flatten()
+#print(type(restored_samples_overlap))
+print(restored_samples_overlap.shape)
 
 """Если мы хотим произвести сравнение с каким-либо другим методом, возможно, возникнет проблема из-за разных длин файлов: текущий алгоритм отбрасывает последние сэмплы в файле чтобы достичь количества сэмплов кратного SQNC_LENGTH. Если раскомментировать вторую строку мы получим массив в котором недостающие восстановленные сэмплы заменены сэмплами исходного массива до требуемой длины, что обеспечит возможность сравнения файлов. output_path - название файла, в который будет записан вывод программы."""
 
 samples_restored_final = samples_restored
-for i in range(len(samples_restored_final)):
-  print(type(samples_restored_final),len(samples_restored_final[i]))
+#for i in range(len(samples_restored_final)):
+  #print(type(samples_restored_final),len(samples_restored_final[i]))
 samples_restored_final = np.append(np.array(samples_restored_final).flatten(),np.array(samples_input_file[len(samples_input_file)-(len(samples_input_file) % SQNC_LENGTH)::]))
 import wave
 import numpy as np
@@ -359,7 +402,12 @@ def write_float_samples_to_wav(samples, sample_rate, output_path):
 
 output_path = 'output.wav'  # Path to save the WAV file
 
-write_float_samples_to_wav(samples_restored_final, fs, output_path)
+#write_float_samples_to_wav(samples_restored_final, fs, output_path)
+#print(f"WAV file written to {output_path}")
+restored_samples_overlap = np.array(restored_samples_overlap).flatten()
+restored_samples_overlap = np.append(np.array(samples_input_file[0:SQNC_LENGTH//4]),restored_samples_overlap)
+restored_samples_overlap = np.append(restored_samples_overlap,np.array(samples_input_file[-SQNC_LENGTH//4:]))
+write_float_samples_to_wav(restored_samples_overlap, fs, output_path)
 print(f"WAV file written to {output_path}")
 
 """Занимательные картинки."""
@@ -367,7 +415,6 @@ print(f"WAV file written to {output_path}")
 import cmath
 import math
 for i in range(20,len(samples_input_sequences)):
-  fs = 16000
   t = np.linspace(0, 1.0, SQNC_LENGTH, endpoint=False)  # Time vector
   plt.subplot(2, 1, 2)
 
