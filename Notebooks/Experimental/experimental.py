@@ -245,7 +245,7 @@ def build_rnn_spectrogram_model(sq_lngth):
     # Use the ISTFT layer to reconstruct the time-domain signal.
     istft_layer = ISTFTLayer(frame_length=FSTEP*2, frame_step=FSTEP, sq_lngth=sq_lngth)
     output_signal = istft_layer([x, phase])  # shape: (batch, sq_lngth)
-
+    output_signal = tf.keras.layers.Add()([input_tensor,output_signal])
     model = tf.keras.models.Model(inputs=input_tensor, outputs=output_signal)
     model.compile(
         optimizer=tf.keras.optimizers.Adam(learning_rate=0.001),
