@@ -67,11 +67,6 @@ def read_wav_as_float(file_path):
 
     return float_data.tolist()
 
-# Example usage
-wav_file_path = 'lecture20m.wav'  # Replace with the path to your WAV file
-wav_file_path1 = 'lecture20mc.wav'
-samples = read_wav_as_float(wav_file_path)
-samples1 = read_wav_as_float(wav_file_path1)
 
 """Функция для записи массива в файл по пути output_path."""
 
@@ -102,30 +97,50 @@ def write_float_samples_to_wav(samples, sample_rate, output_path):
 
         # Write the audio frames
         wav_file.writeframes(int_samples.tobytes())
-#import random
-#for i in range(100):
-#  start = random.randint(0,len(samples1))
-#  samples1[start:start+15] = [1e-10]*15
-#write_float_samples_to_wav(samples1, 16000, "1c16zeros.wav")
 
-"""Разбиваем оба файла на последовательности по SQNC_LENGTH сэмплов, сэмплы исходного файла в samples_sequences, искаженного в sampeles_sequences_clipped."""
+def data_generator(original_file, clipped_file, SQNC_LENGTH, batch_size=32):
+    """
+    A generator function that yields batches of training data.
 
-j = 0
-SQNC_LENGTH = 256
-samples_sequences = []
-samples_sequences_clipped = []
-step_size = SQNC_LENGTH // 2
-while j < len(samples1):
-    #print(j, j+SQNC_LENGTH-1)
-    if(j+SQNC_LENGTH < len(samples1)):
-      samples_sequences.append(samples[j:j+SQNC_LENGTH])
-      samples_sequences_clipped.append(samples1[j:j+SQNC_LENGTH])
-    j += step_size
-#while j < len(samples1):
-#    if(j+SQNC_LENGTH < len(samples1)):
-#        samples_sequences.append(samples[j:j+SQNC_LENGTH])
-#        samples_sequences_clipped.append(samples1[j:j+SQNC_LENGTH])
-#    j += SQNC_LENGTH
+    Each batch is a tuple (X_batch, y_batch) where:
+      - X_batch contains sequences from the clipped audio.
+      - y_batch contains the corresponding sequences from the original audio.
+
+    Parameters:
+        original_file (str): Path to the original (uncropped) WAV file.
+        clipped_file (str): Path to the clipped WAV file.
+        SQNC_LENGTH (int): The length of each sequence (in samples).
+        batch_size (int): Number of sequences per batch.
+
+    Yields:
+        tuple: (np.array of shape (batch_size, SQNC_LENGTH), np.array of shape (batch_size, SQNC_LENGTH))
+    """
+    # Load entire audio files into memory
+    samples = read_wav_as_float(original_file)
+    samples_clipped = read_wav_as_float(clipped_file)
+
+    # Determine step size (50% overlap)
+    step_size = SQNC_LENGTH // 2
+    num_samples = len(samples)
+
+    # Infinite loop to continuously yield batches
+    while True:
+        X_batch = []
+        y_batch = []
+        # Generate overlapping sequences from 0 to (num_samples - SQNC_LENGTH)
+        for i in range(0, num_samples - SQNC_LENGTH + 1, step_size):
+            # Get a sequence of length SQNC_LENGTH
+            y_seq = samples[i : i + SQNC_LENGTH]
+            X_seq = samples_clipped[i : i + SQNC_LENGTH]
+            X_batch.append(X_seq)
+            y_batch.append(y_seq)
+
+            # When a full batch is collected, yield it
+            if len(X_batch) == batch_size:
+                yield np.array(X_batch), np.array(y_batch)
+                X_batch = []
+                y_batch = []
+        # Optionally, you can shuffle the data between epochs or simply loop over again.
 
 """Обучение нейросети на множестве спектрограмм сигнала. N и M - количество точек по осям частоты и времени соответственно в обучающих выборках."""
 
@@ -212,53 +227,76 @@ class Squeeze(tf.keras.layers.Layer):
     def call(self, x):
         return tf.squeeze(x, axis=-1)
 
+# Custom layer wrapping the entire spectrogram processing pipeline.
+class SpectrogramModelLayer(tf.keras.layers.Layer):
+    def __init__(self, sq_lngth, **kwargs):
+        super(SpectrogramModelLayer, self).__init__(**kwargs)
+        self.sq_lngth = sq_lngth
+        self.frame_step = FSTEP
+        self.frame_length = FSTEP * 2  # same as in original (8 if FSTEP=4)
+        # Frequency bins: frame_length//2 + 1 = FSTEP+1 (e.g. 5)
+        self.F_const = self.frame_step + 1
+        # Time frames computed from signal length (same as original)
+        self.M_const = (sq_lngth - self.frame_length) // self.frame_step + 1
 
-# Updated model-building function using differentiable STFT/ISTFT
+        # Instantiate our custom STFT/ISTFT and helper layers.
+        self.stft_layer = STFTLayer(frame_length=self.frame_length, frame_step=self.frame_step)
+        self.istft_layer = ISTFTLayer(frame_length=self.frame_length, frame_step=self.frame_step, sq_lngth=sq_lngth)
+        self.add_inner = AddInnerDim()
+        self.squeeze = Squeeze()
+
+        # Convolution and RNN layers for processing the magnitude.
+        self.conv1 = tf.keras.layers.Conv2D(filters=64, kernel_size=(3, 3), activation='relu', padding='same')
+        self.conv2 = tf.keras.layers.Conv2D(filters=64, kernel_size=(3, 3), activation='relu', padding='same')
+        # After Conv2D, the tensor shape is (batch, F, T, 64)
+        # We reshape it to (batch, F, T*64) where F = F_const.
+        self.rnn1 = tf.keras.layers.SimpleRNN(units=sq_lngth, activation='relu', return_sequences=True)
+        self.rnn2 = tf.keras.layers.SimpleRNN(units=sq_lngth // 2, activation='relu', return_sequences=True)
+        self.dense = tf.keras.layers.Dense(units=self.M_const, activation='linear')
+
+    def call(self, inputs):
+        # inputs: shape (batch, sq_lngth)
+        # Compute STFT; stft_layer returns a tuple (mag, phase) each with shape (batch, F, T)
+        mag, phase = self.stft_layer(inputs)
+
+        # Crop to M_const time frames (if necessary)
+        mag = mag[:, :, :self.M_const]
+        phase = phase[:, :, :self.M_const]
+
+        # Add a singleton channel dimension (for Conv2D)
+        mag = self.add_inner(mag)   # now shape: (batch, F, T, 1)
+        phase = self.add_inner(phase)  # (batch, F, T, 1)
+
+        # Process the magnitude with two Conv2D layers.
+        x = self.conv1(mag)
+        x = self.conv2(x)  # shape: (batch, F, T, 64)
+
+        # Reshape for RNN processing:
+        batch_size = tf.shape(x)[0]
+        # We treat the frequency dimension F as the timesteps (F_const = FSTEP+1)
+        # and flatten the T (time frames) and channel dimensions.
+        x = tf.reshape(x, [batch_size, self.F_const, self.M_const * 64])
+
+        # Process with two SimpleRNN layers.
+        x = self.rnn1(x)
+        x = self.rnn2(x)
+        # Map each of the F timesteps to M_const outputs.
+        x = self.dense(x)  # now x has shape (batch, F, M_const)
+
+        # Process phase: remove the singleton channel dimension.
+        phase = self.squeeze(phase)  # shape: (batch, F, M_const)
+
+        # Reconstruct the time-domain signal via ISTFT.
+        reconstructed = self.istft_layer([x, phase])  # shape: (batch, sq_lngth)
+        # Add a residual connection: original input + reconstruction.
+        return inputs + reconstructed
+
+# Now reimplement build_rnn_spectrogram_model using Sequential.
 def build_rnn_spectrogram_model(sq_lngth):
-    # Define input: a 1D signal of length sq_lngth (batch dimension preserved)
-
-    input_tensor = tf.keras.layers.Input(shape=(sq_lngth,))  # shape: (batch, sq_lngth)
-
-    # Compute the STFT using our custom layer.
-    stft_layer = STFTLayer(frame_length=FSTEP*2, frame_step=FSTEP)
-    mag, phase = stft_layer(input_tensor)
-    # Now mag and phase have shape (batch, F, T) where F = 5 and T = (sq_lngth-8)//4 + 1.
-
-    # For consistency, set T = M_const:
-    M_const = (sq_lngth - FSTEP * 2) // FSTEP + 1
-    mag = mag[:, :, :M_const]   # shape: (batch, 5, M_const)
-    phase = phase[:, :, :M_const]  # shape: (batch, 5, M_const)
-
-    # Add a channel dimension (for Conv2D) while preserving the batch size.
-    mag = AddInnerDim()(mag)      # shape: (batch, 5, M_const, 1)
-    phase = AddInnerDim()(phase)  # shape: (batch, 5, M_const, 1)
-
-    # Process magnitude with 2D convolutions.
-    x = tf.keras.layers.Conv2D(filters=64, kernel_size=(3, 3), activation='relu', padding='same')(mag)
-    x = tf.keras.layers.Conv2D(filters=64, kernel_size=(3, 3), activation='relu', padding='same')(x)
-    # Now x has shape (batch, 5, M_const, 64)
-
-    # Reshape for RNN processing.
-    # We treat the frequency dimension (5) as timesteps, and flatten the remaining dims.
-    x = tf.keras.layers.Reshape((FSTEP + 1, M_const * 64))(x)  # shape: (batch, 5, M_const*64)
-
-    # Process with two SimpleRNN layers.
-    x = tf.keras.layers.SimpleRNN(units=sq_lngth, activation='relu', return_sequences=True)(x)
-    x = tf.keras.layers.SimpleRNN(units=sq_lngth//2, activation='relu', return_sequences=True)(x)
-    '''x = tf.keras.layers.SimpleRNN(units=64, activation='relu', return_sequences=True)(x)
-    x = tf.keras.layers.SimpleRNN(units=32, activation='relu', return_sequences=True)(x)'''
-    # Map each of the 5 timesteps to M_const outputs via a Dense layer.
-    x = tf.keras.layers.Dense(units=M_const, activation='linear')(x)  # shape: (batch, 5, M_const)
-    #x = tf.keras.layers.Multiply()([mag.reshape(x.shape), x]).reshape(x.shape)
-    # x now represents the processed magnitude spectrogram (shape: (batch, 5, M_const)).
-    # For phase, remove the extra channel dimension.
-    phase = Squeeze()(phase)  # shape: (batch, 5, M_const)
-
-    # Use the ISTFT layer to reconstruct the time-domain signal.
-    istft_layer = ISTFTLayer(frame_length=FSTEP*2, frame_step=FSTEP, sq_lngth=sq_lngth)
-    output_signal = istft_layer([x, phase])  # shape: (batch, sq_lngth)
-    output_signal = tf.keras.layers.Add()([input_tensor,output_signal])
-    model = tf.keras.models.Model(inputs=input_tensor, outputs=output_signal)
+    model = tf.keras.Sequential([
+        tf.keras.layers.InputLayer(input_shape=(sq_lngth,)),
+        SpectrogramModelLayer(sq_lngth=sq_lngth)
+    ])
     model.compile(
         optimizer=tf.keras.optimizers.Adam(learning_rate=0.001),
         loss='mse',
@@ -271,13 +309,17 @@ def build_rnn_spectrogram_model(sq_lngth):
 # Assume SQNC_LENGTH, samples_sequences_clipped, and samples_sequences are defined.
 model = build_rnn_spectrogram_model(SQNC_LENGTH)
 model.summary()
-early_stopping = tf.keras.callbacks.EarlyStopping(monitor='loss', patience=0, restore_best_weights=True)
-model.fit(np.array(samples_sequences_clipped), np.array(samples_sequences),
-          batch_size=32, epochs=50, callbacks=[early_stopping])
-
-vect = np.random.rand(SQNC_LENGTH)
-vect = np.expand_dims(vect, axis=0)  # Now shape is (1, SQNC_LENGTH)
-print(model.predict(vect))
+early_stopping = tf.keras.callbacks.EarlyStopping(monitor='loss', patience=20, restore_best_weights=True)
+batch_size = 32
+SQNC_LENGTH = 256
+train_gen = data_generator('1.wav', '1c.wav', SQNC_LENGTH, batch_size=batch_size)
+steps_per_epoch = (len(read_wav_as_float('1.wav')) - SQNC_LENGTH) // (SQNC_LENGTH // 2 * batch_size)
+model.fit(train_gen,
+          steps_per_epoch=steps_per_epoch,
+          epochs=100,
+          callbacks=[early_stopping])
+'''model.fit(np.array(samples_sequences_clipped), np.array(samples_sequences),
+          batch_size=32, epochs=50, callbacks=[early_stopping])'''
 
 """Открытие файла который нужно восстановить и получение массива его спектрограмм. file_for_restoration_path - путь к файлу который нужно восстановить.
 samples_input_sequences - массив семплов этого файла
@@ -338,7 +380,6 @@ print(restored_samples_overlap.shape)
 #samples_restored_final = samples_restored
 #for i in range(len(samples_restored_final)):
   #print(type(samples_restored_final),len(samples_restored_final[i]))
-samples_restored_final = np.append(np.array(samples_restored_final).flatten(),np.array(samples_input_file[len(samples_input_file)-(len(samples_input_file) % SQNC_LENGTH)::]))
 import wave
 import numpy as np
 
