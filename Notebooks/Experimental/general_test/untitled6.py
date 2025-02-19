@@ -29,22 +29,20 @@ from tensorflow.keras.utils import Sequence
 
 def read_wav_as_float(file_path):
     """
-    Reads a WAV file and returns its samples as a list of floating-point values.
+    Reads a WAV file and returns its samples as a NumPy array of float32 values.
 
     Parameters:
         file_path (str): Path to the WAV file.
 
     Returns:
-        list: A list of floating-point samples.
+        np.ndarray: An array of float32 samples in the range [-1.0, 1.0].
     """
-    # Open the WAV file
     with wave.open(file_path, 'rb') as wav_file:
         # Get parameters
         n_channels = wav_file.getnchannels()
         sample_width = wav_file.getsampwidth()
         n_frames = wav_file.getnframes()
         frame_rate = wav_file.getframerate()
-
         print(f"Channels: {n_channels}, Sample Width: {sample_width}, Frame Rate: {frame_rate}, Frames: {n_frames}")
 
         # Read frames as bytes
@@ -55,19 +53,18 @@ def read_wav_as_float(file_path):
     if dtype is None:
         raise ValueError(f"Unsupported sample width: {sample_width}")
 
-    # Convert raw bytes to numpy array
+    # Convert raw bytes to numpy array without copying data
     int_data = np.frombuffer(raw_data, dtype=dtype)
 
-    # Normalize to floating-point range [-1.0, 1.0]
+    # Convert to float32 and normalize to range [-1.0, 1.0]
     max_val = float(2 ** (8 * sample_width - 1))
-    float_data = int_data / max_val
+    float_data = int_data.astype(np.float32) / max_val
 
     # Handle multi-channel audio by averaging channels
     if n_channels > 1:
         float_data = float_data.reshape(-1, n_channels).mean(axis=1)
 
-    return float_data.tolist()
-
+    return float_data
 
 """Функция для записи массива в файл по пути output_path."""
 
@@ -307,7 +304,7 @@ batch_size = 32
 train_gen = AudioDataGenerator(wav_file_path, wav_file_path1, SQNC_LENGTH, batch_size=batch_size, shuffle=True)
 steps_per_epoch = (len(train_gen.samples) - SQNC_LENGTH) // (SQNC_LENGTH // 2 * batch_size)
 model.fit(train_gen,
-          epochs=50,
+          epochs=100,
           callbacks=[early_stopping])
 
 """Открытие файла который нужно восстановить и получение массива его спектрограмм. file_for_restoration_path - путь к файлу который нужно восстановить.
