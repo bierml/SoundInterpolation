@@ -320,7 +320,7 @@ SQNC_LENGTH = 256
 model = build_rnn_spectrogram_model(SQNC_LENGTH)
 model.summary()
 early_stopping = tf.keras.callbacks.EarlyStopping(monitor='loss', patience=1, restore_best_weights=True)
-batch_size = 32
+batch_size = 1024
 train_gen = AudioDataGenerator(wav_file_path, wav_file_path1, SQNC_LENGTH, batch_size=batch_size, shuffle=True)
 steps_per_epoch = (len(train_gen.samples) - SQNC_LENGTH) // (SQNC_LENGTH // 2 * batch_size)
 model.fit(train_gen,
