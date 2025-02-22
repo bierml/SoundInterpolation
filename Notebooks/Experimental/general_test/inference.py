@@ -278,5 +278,3 @@ restored_samples_overlap = np.append(np.array(samples_input_file[0:SQNC_LENGTH//
 restored_samples_overlap = np.append(restored_samples_overlap,np.array(samples_input_file[-SQNC_LENGTH//4:]))
 write_float_samples_to_wav(restored_samples_overlap, fs, output_path)
 print(f"WAV file written to {output_path}")
-
-model.save("clipping_interpolation_model.keras")
