@@ -38,8 +38,8 @@ import os
 os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
 
 
-wav_file_path = "lecture_lng.wav"
-wav_file_path1 = "lecture_lngc.wav"
+wav_file_path = "1.wav"
+wav_file_path1 = "1c.wav"
 import wave
 import numpy as np
 from tensorflow.keras import backend as K
@@ -313,118 +313,121 @@ def build_rnn_spectrogram_model(sq_lngth):
         metrics=['mse']
     )
     return model
+def main():
+    SQNC_LENGTH = 256
+    # Example usage:
+    # Assume SQNC_LENGTH, samples_sequences_clipped, and samples_sequences are defined.
+    model = build_rnn_spectrogram_model(SQNC_LENGTH)
+    model.summary()
+    early_stopping = tf.keras.callbacks.EarlyStopping(monitor='loss', patience=20, restore_best_weights=True)
+    batch_size = 1024
+    train_gen = AudioDataGenerator(wav_file_path, wav_file_path1, SQNC_LENGTH, batch_size=batch_size, shuffle=True)
+    steps_per_epoch = (len(train_gen.samples) - SQNC_LENGTH) // (SQNC_LENGTH // 2 * batch_size)
+    model.fit(train_gen,
+              epochs=50,
+              callbacks=[early_stopping])
 
-SQNC_LENGTH = 256
-# Example usage:
-# Assume SQNC_LENGTH, samples_sequences_clipped, and samples_sequences are defined.
-model = build_rnn_spectrogram_model(SQNC_LENGTH)
-model.summary()
-early_stopping = tf.keras.callbacks.EarlyStopping(monitor='loss', patience=1, restore_best_weights=True)
-batch_size = 1024
-train_gen = AudioDataGenerator(wav_file_path, wav_file_path1, SQNC_LENGTH, batch_size=batch_size, shuffle=True)
-steps_per_epoch = (len(train_gen.samples) - SQNC_LENGTH) // (SQNC_LENGTH // 2 * batch_size)
-model.fit(train_gen,
-          epochs=50,
-          callbacks=[early_stopping])
+    """Открытие файла который нужно восстановить и получение массива его спектрограмм. file_for_restoration_path - путь к файлу который нужно восстановить.
+    samples_input_sequences - массив семплов этого файла
 
-"""Открытие файла который нужно восстановить и получение массива его спектрограмм. file_for_restoration_path - путь к файлу который нужно восстановить.
-samples_input_sequences - массив семплов этого файла
-
-Zyy,phsy - массивы амплитудных и фазовых спектрограмм файла соответственно
-"""
-
-file_for_restoration_path = "1c.wav"
-samples_input_file = read_wav_as_float(file_for_restoration_path)
-j = 0
-SQNC_LENGTH = 256
-fs = 44100
-samples_input_sequences = []
-while j < len(samples_input_file ):
-    if(j+SQNC_LENGTH < len(samples_input_file)):
-        samples_input_sequences.append(samples_input_file[j:j+SQNC_LENGTH])
-    j += SQNC_LENGTH
-import numpy as np
-#import tensorflow as tf
-#import matplotlib.pyplot as plt
-#from scipy.signal import stft, istft
-import wave
-# Open the WAV file
-with wave.open(file_for_restoration_path, 'rb') as wav_file:
-    fs = wav_file.getframerate()
-
-
-"""Для правильного восстановления нужны накладывающиеся последовательности семплов исходного файла. Для простоты возьмем степень наложения окон равной 0.5."""
-
-#print(samples_restored)
-restored_samples_overlap = []
-overlap_input_sequences = []
-step_size = SQNC_LENGTH // 2
-j = 0
-maxv = np.max(np.array(samples_input_file))
-minv = np.min(np.array(samples_input_file))
-while j < len(samples_input_file):
-    #print(j, j+SQNC_LENGTH-1)
-    if(j+step_size < len(samples_input_file)):
-        overlap_input_sequences.append(samples_input_file[j:j+SQNC_LENGTH])
-    j += step_size
-for sqnc in overlap_input_sequences:
-  if(max(sqnc)>(maxv*0.95) or min(sqnc)<(minv*0.95)):
-    elem = np.array(sqnc)
-    elem = np.expand_dims(elem, axis=0)  # Now shape is (1, SQNC_LENGTH)
-    res = model.predict(elem,verbose=0).flatten()
-    #print(res[SQNC_LENGTH//4:(SQNC_LENGTH*3)//4])
-    restored_samples_overlap.append(res[SQNC_LENGTH//4:(SQNC_LENGTH*3)//4])
-  else:
-    restored_samples_overlap.append(np.array(sqnc[SQNC_LENGTH//4:(SQNC_LENGTH*3)//4]))
-
-restored_samples_overlap = np.array(restored_samples_overlap).flatten()
-#print(type(restored_samples_overlap))
-print(restored_samples_overlap.shape)
-
-"""Если мы хотим произвести сравнение с каким-либо другим методом, возможно, возникнет проблема из-за разных длин файлов: текущий алгоритм отбрасывает последние сэмплы в файле чтобы достичь количества сэмплов кратного SQNC_LENGTH. Если раскомментировать вторую строку мы получим массив в котором недостающие восстановленные сэмплы заменены сэмплами исходного массива до требуемой длины, что обеспечит возможность сравнения файлов. output_path - название файла, в который будет записан вывод программы."""
-
-#samples_restored_final = samples_restored
-#for i in range(len(samples_restored_final)):
-  #print(type(samples_restored_final),len(samples_restored_final[i]))
-import wave
-import numpy as np
-
-def write_float_samples_to_wav(samples, sample_rate, output_path):
+    Zyy,phsy - массивы амплитудных и фазовых спектрограмм файла соответственно
     """
-    Writes floating-point audio samples to a mono 16-bit WAV file.
 
-    Parameters:
-        samples (list or np.ndarray): Array of floating-point audio samples in the range [-1.0, 1.0].
-        sample_rate (int): Sample rate of the audio in Hz (e.g., 44100).
-        output_path (str): Path to save the output WAV file.
-    """
-    # Ensure the samples are a NumPy array
-    samples = np.array(samples, dtype=np.float32)
+    file_for_restoration_path = "1c.wav"
+    samples_input_file = read_wav_as_float(file_for_restoration_path)
+    j = 0
+    SQNC_LENGTH = 256
+    fs = 44100
+    samples_input_sequences = []
+    while j < len(samples_input_file ):
+        if(j+SQNC_LENGTH < len(samples_input_file)):
+            samples_input_sequences.append(samples_input_file[j:j+SQNC_LENGTH])
+        j += SQNC_LENGTH
+    import numpy as np
+    #import tensorflow as tf
+    #import matplotlib.pyplot as plt
+    #from scipy.signal import stft, istft
+    import wave
+    # Open the WAV file
+    with wave.open(file_for_restoration_path, 'rb') as wav_file:
+        fs = wav_file.getframerate()
 
-    # Clip the samples to the range [-1.0, 1.0] to prevent overflow
-    samples = np.clip(samples, -1.0, 1.0)
 
-    # Convert to 16-bit PCM format
-    int_samples = (samples * 32767).astype(np.int16)
+    """Для правильного восстановления нужны накладывающиеся последовательности семплов исходного файла. Для простоты возьмем степень наложения окон равной 0.5."""
 
-    # Write to a WAV file
-    with wave.open(output_path, 'wb') as wav_file:
-        # Set the parameters for the WAV file
-        wav_file.setnchannels(1)  # Mono
-        wav_file.setsampwidth(2)  # 16-bit PCM
-        wav_file.setframerate(sample_rate)
+    #print(samples_restored)
+    restored_samples_overlap = []
+    overlap_input_sequences = []
+    step_size = SQNC_LENGTH // 2
+    j = 0
+    maxv = np.max(np.array(samples_input_file))
+    minv = np.min(np.array(samples_input_file))
+    while j < len(samples_input_file):
+        #print(j, j+SQNC_LENGTH-1)
+        if(j+step_size < len(samples_input_file)):
+            overlap_input_sequences.append(samples_input_file[j:j+SQNC_LENGTH])
+        j += step_size
+    for sqnc in overlap_input_sequences:
+      if(max(sqnc)>(maxv*0.95) or min(sqnc)<(minv*0.95)):
+        elem = np.array(sqnc)
+        elem = np.expand_dims(elem, axis=0)  # Now shape is (1, SQNC_LENGTH)
+        res = model.predict(elem,verbose=0).flatten()
+        #print(res[SQNC_LENGTH//4:(SQNC_LENGTH*3)//4])
+        restored_samples_overlap.append(res[SQNC_LENGTH//4:(SQNC_LENGTH*3)//4])
+      else:
+        restored_samples_overlap.append(np.array(sqnc[SQNC_LENGTH//4:(SQNC_LENGTH*3)//4]))
 
-        # Write the audio frames
-        wav_file.writeframes(int_samples.tobytes())
+    restored_samples_overlap = np.array(restored_samples_overlap).flatten()
+    #print(type(restored_samples_overlap))
+    print(restored_samples_overlap.shape)
 
-output_path = 'output.wav'  # Path to save the WAV file
+    """Если мы хотим произвести сравнение с каким-либо другим методом, возможно, возникнет проблема из-за разных длин файлов: текущий алгоритм отбрасывает последние сэмплы в файле чтобы достичь количества сэмплов кратного SQNC_LENGTH. Если раскомментировать вторую строку мы получим массив в котором недостающие восстановленные сэмплы заменены сэмплами исходного массива до требуемой длины, что обеспечит возможность сравнения файлов. output_path - название файла, в который будет записан вывод программы."""
 
-#write_float_samples_to_wav(samples_restored_final, fs, output_path)
-#print(f"WAV file written to {output_path}")
-restored_samples_overlap = np.array(restored_samples_overlap).flatten()
-restored_samples_overlap = np.append(np.array(samples_input_file[0:SQNC_LENGTH//4]),restored_samples_overlap)
-restored_samples_overlap = np.append(restored_samples_overlap,np.array(samples_input_file[-SQNC_LENGTH//4:]))
-write_float_samples_to_wav(restored_samples_overlap, fs, output_path)
-print(f"WAV file written to {output_path}")
+    #samples_restored_final = samples_restored
+    #for i in range(len(samples_restored_final)):
+      #print(type(samples_restored_final),len(samples_restored_final[i]))
+    import wave
+    import numpy as np
 
-model.save("clipping_interpolation_model.keras")
+    def write_float_samples_to_wav(samples, sample_rate, output_path):
+        """
+        Writes floating-point audio samples to a mono 16-bit WAV file.
+
+        Parameters:
+            samples (list or np.ndarray): Array of floating-point audio samples in the range [-1.0, 1.0].
+            sample_rate (int): Sample rate of the audio in Hz (e.g., 44100).
+            output_path (str): Path to save the output WAV file.
+        """
+        # Ensure the samples are a NumPy array
+        samples = np.array(samples, dtype=np.float32)
+
+        # Clip the samples to the range [-1.0, 1.0] to prevent overflow
+        samples = np.clip(samples, -1.0, 1.0)
+
+        # Convert to 16-bit PCM format
+        int_samples = (samples * 32767).astype(np.int16)
+
+        # Write to a WAV file
+        with wave.open(output_path, 'wb') as wav_file:
+            # Set the parameters for the WAV file
+            wav_file.setnchannels(1)  # Mono
+            wav_file.setsampwidth(2)  # 16-bit PCM
+            wav_file.setframerate(sample_rate)
+
+            # Write the audio frames
+            wav_file.writeframes(int_samples.tobytes())
+
+    output_path = 'output.wav'  # Path to save the WAV file
+
+    #write_float_samples_to_wav(samples_restored_final, fs, output_path)
+    #print(f"WAV file written to {output_path}")
+    restored_samples_overlap = np.array(restored_samples_overlap).flatten()
+    restored_samples_overlap = np.append(np.array(samples_input_file[0:SQNC_LENGTH//4]),restored_samples_overlap)
+    restored_samples_overlap = np.append(restored_samples_overlap,np.array(samples_input_file[-SQNC_LENGTH//4:]))
+    write_float_samples_to_wav(restored_samples_overlap, fs, output_path)
+    print(f"WAV file written to {output_path}")
+
+    model.save("clipping_interpolation_model.keras")
+    
+if __name__ == '__main__':
+    main()
