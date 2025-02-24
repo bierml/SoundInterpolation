@@ -38,12 +38,19 @@ import os
 os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
 
 
-wav_file_path = "1.wav"
-wav_file_path1 = "1c.wav"
+wav_file_path = "podcasts.wav"
+wav_file_path1 = "podcastsc.wav"
 import wave
 import numpy as np
 from tensorflow.keras import backend as K
 from tensorflow.keras.utils import Sequence
+
+
+def scheduler(epoch, lr):
+    if epoch < 50:
+        return lr
+    else:
+        return lr * 0.95
 
 def read_wav_as_float(file_path):
     """
@@ -153,7 +160,7 @@ class AudioDataGenerator(Sequence):
 """Обучение нейросети на множестве спектрограмм сигнала. N и M - количество точек по осям частоты и времени соответственно в обучающих выборках."""
 
 import tensorflow as tf
-FSTEP = 16
+FSTEP = 8
 # Custom STFT layer using tf.signal.stft
 class STFTLayer(tf.keras.layers.Layer):
     def __init__(self, frame_length=8, frame_step=4, **kwargs):
@@ -314,18 +321,19 @@ def build_rnn_spectrogram_model(sq_lngth):
     )
     return model
 def main():
-    SQNC_LENGTH = 256
+    SQNC_LENGTH = 512
     # Example usage:
     # Assume SQNC_LENGTH, samples_sequences_clipped, and samples_sequences are defined.
     model = build_rnn_spectrogram_model(SQNC_LENGTH)
     model.summary()
-    early_stopping = tf.keras.callbacks.EarlyStopping(monitor='loss', patience=20, restore_best_weights=True)
+    early_stopping = tf.keras.callbacks.EarlyStopping(monitor='loss', patience=1, restore_best_weights=True)
     batch_size = 1024
     train_gen = AudioDataGenerator(wav_file_path, wav_file_path1, SQNC_LENGTH, batch_size=batch_size, shuffle=True)
     steps_per_epoch = (len(train_gen.samples) - SQNC_LENGTH) // (SQNC_LENGTH // 2 * batch_size)
+    lr_scheduler = tf.keras.callbacks.LearningRateScheduler(scheduler)
     model.fit(train_gen,
               epochs=50,
-              callbacks=[early_stopping])
+              callbacks=[early_stopping,lr_scheduler])
 
     """Открытие файла который нужно восстановить и получение массива его спектрограмм. file_for_restoration_path - путь к файлу который нужно восстановить.
     samples_input_sequences - массив семплов этого файла
@@ -336,7 +344,7 @@ def main():
     file_for_restoration_path = "1c.wav"
     samples_input_file = read_wav_as_float(file_for_restoration_path)
     j = 0
-    SQNC_LENGTH = 256
+    SQNC_LENGTH = 512
     fs = 44100
     samples_input_sequences = []
     while j < len(samples_input_file ):
