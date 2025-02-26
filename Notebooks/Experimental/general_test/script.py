@@ -38,8 +38,8 @@ import os
 os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
 
 
-wav_file_path = "podcasts.wav"
-wav_file_path1 = "podcastsc.wav"
+wav_file_path = "podcastslong.wav"
+wav_file_path1 = "podcastslongc.wav"
 import wave
 import numpy as np
 from tensorflow.keras import backend as K
@@ -267,8 +267,11 @@ class SpectrogramModelLayer(tf.keras.layers.Layer):
         self.conv2 = tf.keras.layers.Conv2D(filters=64, kernel_size=(3, 3), activation='relu', padding='same')
         # After Conv2D, the tensor shape is (batch, F, T, 64)
         # We reshape it to (batch, F, T*64) where F = F_const.
-        self.rnn1 = tf.keras.layers.SimpleRNN(units=sq_lngth, activation='relu', return_sequences=True)
-        self.rnn2 = tf.keras.layers.SimpleRNN(units=sq_lngth // 2, activation='relu', return_sequences=True)
+        self.rnn1 = tf.keras.layers.SimpleRNN(units=2048, activation='relu', return_sequences=True)
+        #self.rnn1 = tf.keras.layers.SimpleRNN(units=sq_lngth, activation='relu', return_sequences=True)
+        self.dropout = tf.keras.layers.Dropout(0.25)
+        #self.rnn2 = tf.keras.layers.SimpleRNN(units=sq_lngth // 2, activation='relu', return_sequences=True)
+        self.rnn2 = tf.keras.layers.SimpleRNN(units=1024,activation='relu',return_sequences=True)
         self.dense = tf.keras.layers.Dense(units=self.M_const, activation='linear')
 
     def call(self, inputs):
@@ -296,6 +299,7 @@ class SpectrogramModelLayer(tf.keras.layers.Layer):
 
         # Process with two SimpleRNN layers.
         x = self.rnn1(x)
+        x = self.dropout(x)
         x = self.rnn2(x)
         # Map each of the F timesteps to M_const outputs.
         x = self.dense(x)  # now x has shape (batch, F, M_const)
@@ -321,13 +325,13 @@ def build_rnn_spectrogram_model(sq_lngth):
     )
     return model
 def main():
-    SQNC_LENGTH = 512
+    SQNC_LENGTH = 4096
     # Example usage:
     # Assume SQNC_LENGTH, samples_sequences_clipped, and samples_sequences are defined.
     model = build_rnn_spectrogram_model(SQNC_LENGTH)
     model.summary()
-    early_stopping = tf.keras.callbacks.EarlyStopping(monitor='loss', patience=1, restore_best_weights=True)
-    batch_size = 1024
+    early_stopping = tf.keras.callbacks.EarlyStopping(monitor='loss', patience=5, restore_best_weights=True)
+    batch_size = 256
     train_gen = AudioDataGenerator(wav_file_path, wav_file_path1, SQNC_LENGTH, batch_size=batch_size, shuffle=True)
     steps_per_epoch = (len(train_gen.samples) - SQNC_LENGTH) // (SQNC_LENGTH // 2 * batch_size)
     lr_scheduler = tf.keras.callbacks.LearningRateScheduler(scheduler)
@@ -344,7 +348,7 @@ def main():
     file_for_restoration_path = "1c.wav"
     samples_input_file = read_wav_as_float(file_for_restoration_path)
     j = 0
-    SQNC_LENGTH = 512
+    #SQNC_LENGTH = 512
     fs = 44100
     samples_input_sequences = []
     while j < len(samples_input_file ):
