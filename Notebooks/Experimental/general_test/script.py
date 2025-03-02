@@ -267,13 +267,17 @@ class SpectrogramModelLayer(tf.keras.layers.Layer):
         self.conv2 = tf.keras.layers.Conv2D(filters=64, kernel_size=(3, 3), activation='relu', padding='same')
         # After Conv2D, the tensor shape is (batch, F, T, 64)
         # We reshape it to (batch, F, T*64) where F = F_const.
-        self.rnn1 = tf.keras.layers.SimpleRNN(units=2048, activation='relu', return_sequences=True)
+        self.rnn1 = tf.keras.layers.SimpleRNN(units=sq_lngth//2, activation='relu', return_sequences=True)
         #self.rnn1 = tf.keras.layers.SimpleRNN(units=sq_lngth, activation='relu', return_sequences=True)
         self.dropout = tf.keras.layers.Dropout(0.25)
         #self.rnn2 = tf.keras.layers.SimpleRNN(units=sq_lngth // 2, activation='relu', return_sequences=True)
-        self.rnn2 = tf.keras.layers.SimpleRNN(units=1024,activation='relu',return_sequences=True)
+        self.rnn2 = tf.keras.layers.SimpleRNN(units=sq_lngth//4,activation='relu',return_sequences=True)
         self.dense = tf.keras.layers.Dense(units=self.M_const, activation='linear')
+        #self.dense1 = tf.keras.layers.Dense(units=1024, activation='linear')
 
+        self.convout = tf.keras.layers.Conv1D(32, 3, activation='relu', padding='same')
+        self.rnnout = tf.keras.layers.SimpleRNN(units=sq_lngth//2, activation='linear')
+        self.denseout = tf.keras.layers.Dense(units=sq_lngth, activation='linear')
     def call(self, inputs):
         # inputs: shape (batch, sq_lngth)
         # Compute STFT; stft_layer returns a tuple (mag, phase) each with shape (batch, F, T)
@@ -299,6 +303,7 @@ class SpectrogramModelLayer(tf.keras.layers.Layer):
 
         # Process with two SimpleRNN layers.
         x = self.rnn1(x)
+        #x = self.dense1(x)
         x = self.dropout(x)
         x = self.rnn2(x)
         # Map each of the F timesteps to M_const outputs.
@@ -309,6 +314,10 @@ class SpectrogramModelLayer(tf.keras.layers.Layer):
 
         # Reconstruct the time-domain signal via ISTFT.
         reconstructed = self.istft_layer([x, phase])  # shape: (batch, sq_lngth)
+        reconstructed = tf.reshape(reconstructed,[batch_size,self.sq_lngth,1])
+        reconstructed = self.convout(reconstructed)
+        reconstructed = self.rnnout(reconstructed)
+        reconstructed = self.denseout(reconstructed)
         # Add a residual connection: original input + reconstruction.
         return inputs + reconstructed
 
@@ -319,24 +328,24 @@ def build_rnn_spectrogram_model(sq_lngth):
         SpectrogramModelLayer(sq_lngth=sq_lngth)
     ])
     model.compile(
-        optimizer=tf.keras.optimizers.Adam(learning_rate=0.001),
+        optimizer=tf.keras.optimizers.Adam(learning_rate=0.0001),
         loss='mse',
         metrics=['mse']
     )
     return model
 def main():
-    SQNC_LENGTH = 4096
+    SQNC_LENGTH = 512
     # Example usage:
     # Assume SQNC_LENGTH, samples_sequences_clipped, and samples_sequences are defined.
     model = build_rnn_spectrogram_model(SQNC_LENGTH)
     model.summary()
     early_stopping = tf.keras.callbacks.EarlyStopping(monitor='loss', patience=5, restore_best_weights=True)
-    batch_size = 256
+    batch_size = 512
     train_gen = AudioDataGenerator(wav_file_path, wav_file_path1, SQNC_LENGTH, batch_size=batch_size, shuffle=True)
     steps_per_epoch = (len(train_gen.samples) - SQNC_LENGTH) // (SQNC_LENGTH // 2 * batch_size)
     lr_scheduler = tf.keras.callbacks.LearningRateScheduler(scheduler)
     model.fit(train_gen,
-              epochs=50,
+              epochs=30,
               callbacks=[early_stopping,lr_scheduler])
 
     """Открытие файла который нужно восстановить и получение массива его спектрограмм. file_for_restoration_path - путь к файлу который нужно восстановить.
