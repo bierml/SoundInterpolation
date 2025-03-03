@@ -250,81 +250,93 @@ class SpectrogramModelLayer(tf.keras.layers.Layer):
         super(SpectrogramModelLayer, self).__init__(**kwargs)
         self.sq_lngth = sq_lngth
         self.frame_step = FSTEP
-        self.frame_length = FSTEP * 2  # same as in original (8 if FSTEP=4)
-        # Frequency bins: frame_length//2 + 1 = FSTEP+1 (e.g. 5)
-        self.F_const = self.frame_step + 1
-        # Time frames computed from signal length (same as original)
+        self.frame_length = FSTEP * 2  # e.g. if FSTEP=8 then frame_length=16
+        # Frequency bins: frame_length//2 + 1 = FSTEP+1 (e.g. 9 if FSTEP=8)
+        self.F_const = self.frame_step + 1  
+        # Time frames computed from signal length:
         self.M_const = (sq_lngth - self.frame_length) // self.frame_step + 1
 
-        # Instantiate our custom STFT/ISTFT and helper layers.
+        # Instantiate custom STFT/ISTFT and helper layers.
         self.stft_layer = STFTLayer(frame_length=self.frame_length, frame_step=self.frame_step)
         self.istft_layer = ISTFTLayer(frame_length=self.frame_length, frame_step=self.frame_step, sq_lngth=sq_lngth)
         self.add_inner = AddInnerDim()
         self.squeeze = Squeeze()
 
-        # Convolution and RNN layers for processing the magnitude.
+        # Layers for processing the magnitude spectrogram.
         self.conv1 = tf.keras.layers.Conv2D(filters=64, kernel_size=(3, 3), activation='relu', padding='same')
         self.conv2 = tf.keras.layers.Conv2D(filters=64, kernel_size=(3, 3), activation='relu', padding='same')
-        # After Conv2D, the tensor shape is (batch, F, T, 64)
-        # We reshape it to (batch, F, T*64) where F = F_const.
         self.rnn1 = tf.keras.layers.SimpleRNN(units=sq_lngth//2, activation='relu', return_sequences=True)
-        #self.rnn1 = tf.keras.layers.SimpleRNN(units=sq_lngth, activation='relu', return_sequences=True)
         self.dropout = tf.keras.layers.Dropout(0.25)
-        #self.rnn2 = tf.keras.layers.SimpleRNN(units=sq_lngth // 2, activation='relu', return_sequences=True)
-        self.rnn2 = tf.keras.layers.SimpleRNN(units=sq_lngth//4,activation='relu',return_sequences=True)
+        self.rnn2 = tf.keras.layers.SimpleRNN(units=sq_lngth//4, activation='relu', return_sequences=True)
         self.dense = tf.keras.layers.Dense(units=self.M_const, activation='linear')
-        #self.dense1 = tf.keras.layers.Dense(units=1024, activation='linear')
 
-        self.convout = tf.keras.layers.Conv1D(32, 3, activation='relu', padding='same')
-        self.rnnout = tf.keras.layers.SimpleRNN(units=sq_lngth//2, activation='linear')
-        self.denseout = tf.keras.layers.Dense(units=sq_lngth, activation='linear')
+        # Post-ISTFT refinement block:
+        # Original pipeline: Conv1D -> SimpleRNN -> Dense -> (residual addition)
+        # Now we add an extra SimpleRNN layer before the existing SimpleRNN and a second Conv1D after the Dense.
+        self.convout = tf.keras.layers.Conv1D(filters=32, kernel_size=3, activation='relu', padding='same')
+        # New additional SimpleRNN layer (rnnout2)
+        self.rnnout2 = tf.keras.layers.SimpleRNN(units=32, activation='relu', return_sequences=True)
+        # Existing SimpleRNN layer (rnnout)
+        self.rnnout = tf.keras.layers.SimpleRNN(units=sq_lngth//2, activation='relu', return_sequences=True)
+        # Change denseout to output 1 unit per timestep.
+        self.denseout = tf.keras.layers.Dense(units=sq_lngth//2, activation='linear')
+        # New additional Conv1D layer (convout2) before adding residual connection.
+        self.convout2 = tf.keras.layers.Conv1D(filters=1, kernel_size=3, activation='linear', padding='same')
+
     def call(self, inputs):
-        # inputs: shape (batch, sq_lngth)
-        # Compute STFT; stft_layer returns a tuple (mag, phase) each with shape (batch, F, T)
-        mag, phase = self.stft_layer(inputs)
-
-        # Crop to M_const time frames (if necessary)
+        # inputs: (batch, sq_lngth)
+        mag, phase = self.stft_layer(inputs)  # both: (batch, F, T)
+        # Crop to M_const time frames.
         mag = mag[:, :, :self.M_const]
         phase = phase[:, :, :self.M_const]
-
         # Add a singleton channel dimension (for Conv2D)
-        mag = self.add_inner(mag)   # now shape: (batch, F, T, 1)
+        mag = self.add_inner(mag)      # (batch, F, T, 1)
         phase = self.add_inner(phase)  # (batch, F, T, 1)
 
-        # Process the magnitude with two Conv2D layers.
+        # Process magnitude with Conv2D layers.
         x = self.conv1(mag)
-        x = self.conv2(x)  # shape: (batch, F, T, 64)
+        x = self.conv2(x)  # x: (batch, F, T, 64)
 
-        # Reshape for RNN processing:
         batch_size = tf.shape(x)[0]
-        # We treat the frequency dimension F as the timesteps (F_const = FSTEP+1)
-        # and flatten the T (time frames) and channel dimensions.
-        x = tf.reshape(x, [batch_size, self.F_const, self.M_const * 64])
+        # Reshape for RNN: treat frequency dimension (F) as timesteps; flatten T and channels.
+        x = tf.reshape(x, [batch_size, self.F_const, self.M_const * 64])  # (batch, F, T*64)
 
         # Process with two SimpleRNN layers.
         x = self.rnn1(x)
-        #x = self.dense1(x)
         x = self.dropout(x)
         x = self.rnn2(x)
-        # Map each of the F timesteps to M_const outputs.
-        x = self.dense(x)  # now x has shape (batch, F, M_const)
+        # Map each timestep to M_const outputs.
+        x = self.dense(x)  # now x: (batch, F, M_const)
 
-        # Process phase: remove the singleton channel dimension.
-        phase = self.squeeze(phase)  # shape: (batch, F, M_const)
+        # Process phase: remove channel dimension → (batch, F, M_const)
+        phase = self.squeeze(phase)
 
-        # Reconstruct the time-domain signal via ISTFT.
-        reconstructed = self.istft_layer([x, phase])  # shape: (batch, sq_lngth)
-        reconstructed = tf.reshape(reconstructed,[batch_size,self.sq_lngth,1])
-        reconstructed = self.convout(reconstructed)
-        reconstructed = self.rnnout(reconstructed)
-        reconstructed = self.denseout(reconstructed)
-        # Add a residual connection: original input + reconstruction.
-        return inputs + reconstructed
+        # Reconstruct time-domain signal via ISTFT.
+        reconstructed = self.istft_layer([x, phase])  # (batch, sq_lngth)
+
+        # === Post-ISTFT refinement block ===
+        # Expand dims for Conv1D: (batch, sq_lngth, 1)
+        reconstructed = tf.reshape(reconstructed, [batch_size, self.sq_lngth, 1])
+        # First Conv1D.
+        rec_proc1 = self.convout(reconstructed)  # (batch, sq_lngth, 32)
+        # New additional SimpleRNN layer.
+        rec_proc = self.rnnout2(rec_proc1)       # (batch, sq_lngth, 32)
+        # Existing SimpleRNN layer.
+        rec_proc = self.rnnout(rec_proc)          # (batch, sq_lngth, sq_lngth//2)
+        # TimeDistributed Dense to map each timestep to 1 feature.
+        rec_proc = self.denseout(rec_proc)        # (batch, sq_lngth, 1)
+        # New additional Conv1D layer.
+        rec_proc = self.convout2(rec_proc)        # (batch, sq_lngth, 1)
+        rec_proc = tf.squeeze(rec_proc, axis=-1)  # (batch, sq_lngth)
+        # === End refinement block ===
+
+        # Residual connection.
+        return inputs + rec_proc
 
 # Now reimplement build_rnn_spectrogram_model using Sequential.
 def build_rnn_spectrogram_model(sq_lngth):
     model = tf.keras.Sequential([
-        tf.keras.layers.InputLayer(input_shape=(sq_lngth,)),
+        tf.keras.layers.InputLayer(shape=(sq_lngth,)),
         SpectrogramModelLayer(sq_lngth=sq_lngth)
     ])
     model.compile(
@@ -345,7 +357,7 @@ def main():
     steps_per_epoch = (len(train_gen.samples) - SQNC_LENGTH) // (SQNC_LENGTH // 2 * batch_size)
     lr_scheduler = tf.keras.callbacks.LearningRateScheduler(scheduler)
     model.fit(train_gen,
-              epochs=30,
+              epochs=10,
               callbacks=[early_stopping,lr_scheduler])
 
     """Открытие файла который нужно восстановить и получение массива его спектрограмм. file_for_restoration_path - путь к файлу который нужно восстановить.
