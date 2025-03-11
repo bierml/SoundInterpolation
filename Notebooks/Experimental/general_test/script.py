@@ -298,77 +298,40 @@ def write_float_samples_to_wav(samples, sample_rate, output_path):
 class AudioDataGenerator(Sequence):
     """
     A Keras Sequence for generating batches of overlapping audio sequences.
-    
-    Instead of reading many small segments from disk, this generator caches chunks
-    of 100,000 samples (plus extra samples to cover sequences that start near the end
-    of the chunk). It then extracts full sequences (of length SQNC_LENGTH) from these chunks.
+
+    This generator loads the entire audio files once, computes the starting indices
+    for sequences of length SQNC_LENGTH with 50% overlap, and yields batches of data.
     """
-    def __init__(self, original_file, clipped_file, SQNC_LENGTH, batch_size=32, cache_size=100, shuffle=True):
-        self.original_file = original_file
-        self.clipped_file = clipped_file
+    def __init__(self, original_file, clipped_file, SQNC_LENGTH, batch_size=32, shuffle=True):
+        #self.samples = read_wav_as_float(original_file)
+        #self.samples_clipped = read_wav_as_float(clipped_file)
+        self.nofsamples = get_rf64_sample_count(original_file)
         self.SQNC_LENGTH = SQNC_LENGTH
         self.batch_size = batch_size
-        self.cache_size = cache_size  # number of samples to cache per chunk (starting positions)
-        self.nofsamples = get_rf64_sample_count(original_file)
         self.step_size = SQNC_LENGTH // 2  # 50% overlap
-        # Precompute global starting indices for full sequences.
-        self.global_indices = list(range(0, self.nofsamples - SQNC_LENGTH + 1, self.step_size))
+        # Compute starting indices for sequences
+        self.indices = list(range(0, self.nofsamples - SQNC_LENGTH + 1, self.step_size))
         self.shuffle = shuffle
         if self.shuffle:
-            np.random.shuffle(self.global_indices)
-    
+            np.random.shuffle(self.indices)
+
     def __len__(self):
-        return int(np.ceil(len(self.global_indices) / self.batch_size))
-    
+        # Number of batches per epoch is the total number of sequences divided by batch_size.
+        return int(np.ceil(len(self.indices) / self.batch_size))
+
     def __getitem__(self, idx):
-        # Get global sequence starting indices for this batch.
-        batch_global_indices = self.global_indices[idx * self.batch_size : (idx + 1) * self.batch_size]
-        
-        # Group the batch indices by the chunk they belong to.
-        # Here, we define the chunk number as:
-        #    chunk_num = global_index // cache_size
-        # and we will load from:
-        #    chunk_start = chunk_num * cache_size
-        #    chunk_end   = min(nofsamples, chunk_start + cache_size + SQNC_LENGTH - 1)
-        chunk_groups = {}
-        for g in batch_global_indices:
-            chunk_num = g // self.cache_size
-            local_index = g - (chunk_num * self.cache_size)
-            if chunk_num not in chunk_groups:
-                chunk_groups[chunk_num] = []
-            chunk_groups[chunk_num].append(local_index)
-        
+        batch_indices = self.indices[idx * self.batch_size : (idx + 1) * self.batch_size]
         X_batch = []
         y_batch = []
-        
-        # For each chunk, load the large block and extract sequences.
-        for chunk_num, local_indices in chunk_groups.items():
-            chunk_start = chunk_num * self.cache_size
-            # Load extra SQNC_LENGTH-1 samples so that sequences starting at the end of the chunk are complete.
-            chunk_end = min(self.nofsamples, chunk_start + self.cache_size + self.SQNC_LENGTH - 1)
-            
-            # Read the chunk from the files. These functions return a list (or array) of sample frames.
-            clipped_chunk = read_rf64_samples(self.clipped_file, chunk_start, chunk_end)
-            original_chunk = read_rf64_samples(self.original_file, chunk_start, chunk_end)
-            
-            # Extract sequences from this chunk.
-            for li in local_indices:
-                # Ensure that the extracted sequence has exactly SQNC_LENGTH frames.
-                if li + self.SQNC_LENGTH > len(clipped_chunk):
-                    # This situation should not happen because global indices were computed
-                    # to allow a full sequence, but guard just in case.
-                    continue
-                X_seq = clipped_chunk[li : li + self.SQNC_LENGTH]
-                y_seq = original_chunk[li : li + self.SQNC_LENGTH]
-                X_batch.append(X_seq)
-                y_batch.append(y_seq)
-        
-        # Convert lists to numpy arrays. Each element should now have uniform shape.
+        for i in batch_indices:
+            #X_batch.append(self.samples_clipped[i : i + self.SQNC_LENGTH])
+            X_batch.append(read_rf64_samples(clipped_file, i, i + self.SQNC_LENGTH))
+            y_batch.append(read_rf64_samples(original_file, i, i + self.SQNC_LENGTH))
         return np.array(X_batch), np.array(y_batch)
-    
+
     def on_epoch_end(self):
         if self.shuffle:
-            np.random.shuffle(self.global_indices)
+            np.random.shuffle(self.indices)
 
 """Обучение нейросети на множестве спектрограмм сигнала. N и M - количество точек по осям частоты и времени соответственно в обучающих выборках."""
 
