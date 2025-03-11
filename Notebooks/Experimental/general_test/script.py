@@ -38,10 +38,9 @@ import os
 os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
 
 
-wav_file_path = "lecture_lngf.rf64"
-wav_file_path1 = "lecture_lngfс.rf64"
+wav_file_path = "podcastslong.wav"
+wav_file_path1 = "podcastslongc.wav"
 import wave
-import struct
 import numpy as np
 from tensorflow.keras import backend as K
 from tensorflow.keras.utils import Sequence
@@ -52,179 +51,6 @@ def scheduler(epoch, lr):
         return lr
     else:
         return lr * 0.95
-
-def get_rf64_sample_count(filename: str) -> int:
-    """
-    Returns the total number of sample frames in an RF64 file.
-    This function only reads header information (including the ds64 chunk)
-    without loading the entire file into RAM.
-    """
-    with open(filename, "rb") as f:
-        # Read first 12 bytes: "RF64", file size placeholder, and "WAVE"
-        header = f.read(12)
-        if header[0:4] != b"RF64":
-            raise ValueError("Not an RF64 file.")
-        
-        # Iterate through chunks until the ds64 chunk is found.
-        while True:
-            chunk_id = f.read(4)
-            if not chunk_id:
-                raise ValueError("Reached EOF without finding ds64 chunk.")
-            chunk_size_bytes = f.read(4)
-            if len(chunk_size_bytes) < 4:
-                raise ValueError("Incomplete chunk header encountered.")
-            chunk_size = struct.unpack("<I", chunk_size_bytes)[0]
-            
-            if chunk_id == b"ds64":
-                ds64_data = f.read(chunk_size)
-                # ds64 chunk should contain at least 24 bytes:
-                # 8 bytes for riffSize, 8 bytes for dataSize, and 8 bytes for sampleCount.
-                if len(ds64_data) < 24:
-                    raise ValueError("Incomplete ds64 chunk data.")
-                # sampleCount is located at byte offset 16 in the ds64 data.
-                sample_count = struct.unpack("<Q", ds64_data[16:24])[0]
-                return sample_count
-            else:
-                # Skip over this chunk.
-                f.seek(chunk_size, 1)
-
-
-def read_rf64_samples(filename: str, start_index: int, end_index: int) -> list:
-    """
-    Reads and returns a sequence of samples from an RF64 file as a list of normalized floating-point values 
-    in the range [-1, 1]. The sample values are returned as a list of lists (one per sample frame), where 
-    each inner list contains values for each channel.
-    
-    The function reads only the required data from the "data" chunk (without loading the full file into RAM)
-    and assumes:
-      - The file is PCM encoded (either standard or extensible PCM).
-      - start_index and end_index are indices of sample frames (start inclusive, end exclusive).
-      - The "fmt " chunk appears before the "data" chunk.
-    """
-    if start_index < 0 or end_index <= start_index:
-        raise ValueError("Invalid sample indices provided.")
-    
-    with open(filename, "rb") as f:
-        # Read initial 12 bytes: "RF64", file size placeholder, and "WAVE"
-        header = f.read(12)
-        if header[0:4] != b"RF64":
-            raise ValueError("Not an RF64 file.")
-        
-        # Skip ds64 chunk (assumed to be the first chunk)
-        while True:
-            chunk_id = f.read(4)
-            if not chunk_id:
-                raise ValueError("Reached EOF without finding ds64 chunk.")
-            chunk_size_bytes = f.read(4)
-            if len(chunk_size_bytes) < 4:
-                raise ValueError("Incomplete chunk header encountered.")
-            chunk_size = struct.unpack("<I", chunk_size_bytes)[0]
-            if chunk_id == b"ds64":
-                f.seek(chunk_size, 1)
-                break
-            else:
-                f.seek(chunk_size, 1)
-        
-        # Locate the "fmt " chunk to determine audio format, block alignment, and bits per sample.
-        fmt_found = False
-        block_align = None
-        num_channels = None
-        bits_per_sample = None
-        
-        while not fmt_found:
-            chunk_id = f.read(4)
-            if not chunk_id:
-                raise ValueError("Reached EOF without finding fmt chunk.")
-            chunk_size_bytes = f.read(4)
-            if len(chunk_size_bytes) < 4:
-                raise ValueError("Incomplete chunk header encountered.")
-            chunk_size = struct.unpack("<I", chunk_size_bytes)[0]
-            
-            if chunk_id == b"fmt ":
-                fmt_data = f.read(chunk_size)
-                if len(fmt_data) < 16:
-                    raise ValueError("Incomplete fmt chunk.")
-                # Unpack first 16 bytes: AudioFormat (H), NumChannels (H), SampleRate (I),
-                # ByteRate (I), BlockAlign (H), BitsPerSample (H)
-                audio_format, num_channels, sample_rate, byte_rate, block_align, bits_per_sample = \
-                    struct.unpack("<HHIIHH", fmt_data[:16])
-                
-                if audio_format == 1:
-                    # Standard PCM
-                    pass
-                elif audio_format == 0xfffe:
-                    # WAVE_FORMAT_EXTENSIBLE
-                    if len(fmt_data) < 40:
-                        raise ValueError("Incomplete WAVE_FORMAT_EXTENSIBLE fmt chunk.")
-                    # Unpack extended fields: cbSize (H), wValidBitsPerSample (H),
-                    # dwChannelMask (I), SubFormat (16s)
-                    cbSize, validBitsPerSample, channelMask, subformat = struct.unpack("<HHI16s", fmt_data[16:40])
-                    # Expected PCM GUID for extensible format (little-endian):
-                    pcm_guid = b'\x01\x00\x00\x00\x00\x00\x10\x00\x80\x00\x00\xAA\x00\x38\x9B\x71'
-                    if subformat != pcm_guid:
-                        raise ValueError("Only PCM encoded files are supported (extensible subformat mismatch).")
-                    # Use the valid bits per sample for normalization.
-                    bits_per_sample = validBitsPerSample
-                else:
-                    raise ValueError("Only PCM encoded files are supported.")
-                fmt_found = True
-            else:
-                f.seek(chunk_size, 1)
-        
-        if block_align is None or num_channels is None or bits_per_sample is None:
-            raise ValueError("Audio format information not found.")
-        
-        # Locate the "data" chunk.
-        data_found = False
-        while not data_found:
-            chunk_header = f.read(8)
-            if len(chunk_header) < 8:
-                raise ValueError("Reached EOF without finding data chunk.")
-            chunk_id = chunk_header[0:4]
-            chunk_size = struct.unpack("<I", chunk_header[4:8])[0]
-            if chunk_id == b"data":
-                data_start = f.tell()
-                data_found = True
-            else:
-                f.seek(chunk_size, 1)
-        
-        # Calculate byte offset and number of bytes to read for the requested sample frames.
-        offset = start_index * block_align
-        num_frames = end_index - start_index
-        num_bytes = num_frames * block_align
-        
-        # Seek to the beginning of the desired sample segment and read the sample data.
-        f.seek(data_start + offset)
-        sample_bytes = f.read(num_bytes)
-        if len(sample_bytes) != num_bytes:
-            raise ValueError("Could not read the requested number of sample bytes.")
-    
-    # Convert raw bytes to a NumPy array based on bits per sample.
-    if bits_per_sample == 8:
-        # 8-bit PCM is usually unsigned.
-        dtype = np.uint8
-        samples = np.frombuffer(sample_bytes, dtype=dtype).astype(np.float32)
-        # Normalize: convert range from [0, 255] to [-1, 1]
-        samples = (samples - 128) / 128.0
-    elif bits_per_sample == 16:
-        dtype = np.int16
-        samples = np.frombuffer(sample_bytes, dtype=dtype).astype(np.float32)
-        samples = samples / 32768.0
-    elif bits_per_sample == 32:
-        dtype = np.int32
-        samples = np.frombuffer(sample_bytes, dtype=dtype).astype(np.float32)
-        samples = samples / 2147483648.0
-    else:
-        raise ValueError(f"Unsupported bits per sample: {bits_per_sample}")
-    
-    # Reshape the 1D array to a 2D array (num_frames, num_channels)
-    try:
-        samples = samples.reshape(-1, num_channels)
-    except Exception as e:
-        raise ValueError("Mismatch in number of samples and channel count.") from e
-    
-    # Return the normalized samples as a list of lists.
-    return samples.tolist()
 
 def read_wav_as_float(file_path):
     """
@@ -303,14 +129,13 @@ class AudioDataGenerator(Sequence):
     for sequences of length SQNC_LENGTH with 50% overlap, and yields batches of data.
     """
     def __init__(self, original_file, clipped_file, SQNC_LENGTH, batch_size=32, shuffle=True):
-        #self.samples = read_wav_as_float(original_file)
-        #self.samples_clipped = read_wav_as_float(clipped_file)
-        self.nofsamples = get_rf64_sample_count(original_file)
+        self.samples = read_wav_as_float(original_file)
+        self.samples_clipped = read_wav_as_float(clipped_file)
         self.SQNC_LENGTH = SQNC_LENGTH
         self.batch_size = batch_size
         self.step_size = SQNC_LENGTH // 2  # 50% overlap
         # Compute starting indices for sequences
-        self.indices = list(range(0, self.nofsamples - SQNC_LENGTH + 1, self.step_size))
+        self.indices = list(range(0, len(self.samples) - SQNC_LENGTH + 1, self.step_size))
         self.shuffle = shuffle
         if self.shuffle:
             np.random.shuffle(self.indices)
@@ -324,9 +149,8 @@ class AudioDataGenerator(Sequence):
         X_batch = []
         y_batch = []
         for i in batch_indices:
-            #X_batch.append(self.samples_clipped[i : i + self.SQNC_LENGTH])
-            X_batch.append(read_rf64_samples(clipped_file, i, i + self.SQNC_LENGTH))
-            y_batch.append(read_rf64_samples(original_file, i, i + self.SQNC_LENGTH))
+            X_batch.append(self.samples_clipped[i : i + self.SQNC_LENGTH])
+            y_batch.append(self.samples[i : i + self.SQNC_LENGTH])
         return np.array(X_batch), np.array(y_batch)
 
     def on_epoch_end(self):
@@ -530,7 +354,7 @@ def main():
     early_stopping = tf.keras.callbacks.EarlyStopping(monitor='loss', patience=5, restore_best_weights=True)
     batch_size = 512
     train_gen = AudioDataGenerator(wav_file_path, wav_file_path1, SQNC_LENGTH, batch_size=batch_size, shuffle=True)
-    steps_per_epoch = (train_gen.nofsamples - SQNC_LENGTH) // (SQNC_LENGTH // 2 * batch_size)
+    steps_per_epoch = (len(train_gen.samples) - SQNC_LENGTH) // (SQNC_LENGTH // 2 * batch_size)
     lr_scheduler = tf.keras.callbacks.LearningRateScheduler(scheduler)
     model.fit(train_gen,
               epochs=10,
