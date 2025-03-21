@@ -39,7 +39,7 @@ import contextlib
 import os
 
 os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
-
+os.environ['CUDA_VISIBLE_DEVICES'] = "0"
 
 wav_file_path = "lecture_lngf.rf64"
 wav_file_path1 = "lecture_lngfс.rf64"
@@ -50,7 +50,7 @@ from tensorflow.keras.utils import Sequence
 
 
 def scheduler(epoch, lr):
-    if epoch < 50:
+    if epoch < 20:
         return lr
     else:
         return lr * 0.95
@@ -129,46 +129,60 @@ def get_number_of_samples(filename):
         nframes = wf.getnframes()
     return nframes
 
-def read_samples_segment(filename, start_index, end_index):
+def find_data_chunk_offset(filename):
     """
-    Reads and returns samples from an RF64 file between the specified frame indices.
-    
-    Parameters:
-      filename (str): Path to the RF64 file.
-      start_index (int): Starting frame index (inclusive).
-      end_index (int): Ending frame index (exclusive).
+    Scans the RF64 file to find the offset of the 'data' chunk.
     
     Returns:
-      np.ndarray: An array of audio samples (reshaped to (num_frames, num_channels) if multichannel).
+      offset (int): The byte offset where the 'data' chunk's raw data begins.
     """
+    with open(filename, "rb") as f:
+        # Read the header.
+        header = f.read(12)
+        if header[0:4] != b"RF64":
+            raise ValueError("Not an RF64 file.")
+        # Loop over the chunks.
+        while True:
+            chunk_header = f.read(8)
+            if len(chunk_header) < 8:
+                raise ValueError("Reached EOF without finding 'data' chunk.")
+            chunk_id = chunk_header[0:4]
+            # Unpack the chunk size as a little-endian unsigned int.
+            chunk_size = struct.unpack("<I", chunk_header[4:8])[0]
+            if chunk_id == b"data":
+                # The current file position is the start of the data.
+                offset = f.tell()
+                return offset
+            else:
+                # Skip this chunk.
+                # Some chunks might be padded to an even number of bytes.
+                f.seek(chunk_size, 1)
+
+def memmap_rf64(filename):
+    # Open the file with wave_bwf_rf64 to get header info.
     with contextlib.closing(wave_bwf_rf64.open(filename, 'rb')) as wf:
-        nframes = wf.getnframes()
-        if start_index < 0 or end_index > nframes or start_index >= end_index:
-            raise ValueError("Invalid start or end index.")
-        
-        # Set the file pointer to the desired start frame.
-        wf.setpos(start_index)
-        # Read the desired number of frames.
-        frames = wf.readframes(end_index - start_index)
-        
-        sample_width = wf.getsampwidth()
+        sample_width = wf.getsampwidth()  # in bytes
         num_channels = wf.getnchannels()
-        
-        # Map sample width (in bytes) to numpy dtype.
-        if sample_width == 1:
-            dtype = np.uint8  # usually unsigned
-        elif sample_width == 2:
-            dtype = np.int16
-        elif sample_width == 4:
-            dtype = np.int32
-        else:
-            raise ValueError(f"Unsupported sample width: {sample_width}")
-        
-        # Convert the raw bytes to a numpy array.
-        samples = np.frombuffer(frames, dtype=dtype)/(2**(sample_width*8-1))
-        if num_channels > 1:
-            samples = samples.reshape(-1, num_channels)
-        return samples
+        nframes = wf.getnframes()
+    
+    # Find the data chunk offset by scanning the file.
+    data_offset = find_data_chunk_offset(filename)
+    
+    # Map sample width (in bytes) to numpy dtype.
+    if sample_width == 1:
+        dtype = np.uint8   # 8-bit PCM is usually unsigned.
+    elif sample_width == 2:
+        dtype = np.int16
+    elif sample_width == 4:
+        dtype = np.int32
+    else:
+        raise ValueError(f"Unsupported sample width: {sample_width}")
+    
+    # Create a memmap of the file starting at the data chunk offset.
+    # The total number of samples is (nframes * num_channels).
+    shape = (nframes, num_channels)
+    mm = np.memmap(filename, dtype=dtype, mode='r', offset=data_offset, shape=shape)/(2**(sample_width*8-1))
+    return mm
 
 class AudioDataGenerator(Sequence):
     """
@@ -176,13 +190,12 @@ class AudioDataGenerator(Sequence):
     audio sequences (with 50% overlap). Since all data are already in memory, __getitem__ only slices
     preloaded arrays.
     """
-    def __init__(self, original_file, clipped_file, SQNC_LENGTH, batch_size = 32, cache_size = 100, shuffle=True):
+    def __init__(self, original_file, clipped_file, SQNC_LENGTH, batch_size = 512, shuffle=True):
         self.SQNC_LENGTH = SQNC_LENGTH
         self.batch_size = batch_size
         self.shuffle = shuffle
         self.ofname = original_file
         self.cfname = clipped_file
-        self.cache_size = cache_size
         # Get total number of sample frames from one of the files.
         self.nofsamples = get_number_of_samples(original_file)
         # Compute overlapping sequence starting indices (50% overlap)
@@ -191,74 +204,29 @@ class AudioDataGenerator(Sequence):
         #number of the latest sequence stored in cache
         self.startindex = -1
         self.endindex = -1
-        self.cache_samples_orig = []
-        self.cache_samples_clip = []
+        self.samples_orig = memmap_rf64(original_file)
+        self.samples_clip = memmap_rf64(clipped_file)
         if self.shuffle:
-            for i in range(int(np.ceil(len(self.indices)/(self.batch_size*self.cache_size)))):
-                cache = self.indices[self.batch_size*self.cache_size*i:self.batch_size*self.cache_size*(i+1)]
-                np.random.shuffle(cache)
-                self.indices[self.batch_size*self.cache_size*i:self.batch_size*self.cache_size*(i+1)] = cache
-
+            np.random.shuffle(self.indices)
     def __len__(self):
         # Return the number of batches per epoch.
         return int(np.ceil(len(self.indices) / self.batch_size))
 
     def __getitem__(self, idx):
-        #print("idx=",idx)
-        #check if updating the cache is needed
-        if((idx//self.cache_size)*self.cache_size*self.batch_size != self.startindex):
-           #updating the cache
-           #number of batch for cache to start
-           cachestart_in_batch_num = (idx//self.cache_size)*self.cache_size
-           self.startindex = cachestart_in_batch_num*self.batch_size
-           #cache size in batches
-           cachesz = self.cache_size*self.batch_size
-           #add (cache size-1) to startindex to find actual last sequence in cache
-           self.endindex = self.startindex + cachesz - 1
-           #print(self.startindex,self.endindex)
-           #print("indicies before correction: ", self.startindex,self.endindex)
-           #idx - number of currently requested batch of sequences 
-           #startindex and endindex - indicies of the first (inclusively) and last (exclusively) sequences stored in cache
-           #example: 3627th sequence -> startindex = 3600, endindex = 3699 (for cachesize=100)
-           if(self.endindex > len(self.indices)-1):
-               self.endindex = len(self.indices)-1
-           #absolute index of cache starting sample in the whole file
-           fsqstartabsolute = self.startindex*self.step_size
-           #absolute index of the last cache sequence's start 
-           lsqstartabsolute = self.endindex*self.step_size
-           #absolute index of the last cache sequence's end
-           lsqendabsolute = lsqstartabsolute + self.SQNC_LENGTH
-           self.cache_samples_orig = read_samples_segment(self.ofname,fsqstartabsolute,lsqendabsolute+1)
-           self.cache_samples_clip = read_samples_segment(self.cfname,fsqstartabsolute,lsqendabsolute+1)
-        # Get the global starting indices for this batch.
-        start_batch = idx * self.batch_size
-        end_batch = (idx + 1) * self.batch_size
-        if(end_batch>len(self.indices)-1):
-            end_batch= len(self.indices)-1
-        batch_indices = self.indices[start_batch : end_batch]
+        batch_indices = self.indices[idx * self.batch_size : (idx + 1) * self.batch_size]
         X_batch = []
         y_batch = []
-        for start in batch_indices:
-            # Slice a contiguous sequence of length SQNC_LENGTH from the preloaded arrays.
-            #absolute index in the whole file where cache starts
-            cachestartabs = self.startindex*self.step_size
-            #print("idx:",idx)
-            X_seq = self.cache_samples_orig[start - cachestartabs : start - cachestartabs + self.SQNC_LENGTH]
-            y_seq = self.cache_samples_clip[start - cachestartabs : start - cachestartabs + self.SQNC_LENGTH]
-            X_batch.append(X_seq)
-            y_batch.append(y_seq)
-        # Convert list of sequences to NumPy arrays.
+        for i in batch_indices:
+            #X_batch.append(self.samples_clipped[i : i + self.SQNC_LENGTH])
+            #y_batch.append(self.samples[i : i + self.SQNC_LENGTH])
+            X_batch.append(self.samples_clip[i:i+self.SQNC_LENGTH])
+            y_batch.append(self.samples_orig[i:i+self.SQNC_LENGTH])
         return np.array(X_batch), np.array(y_batch)
 
     def on_epoch_end(self):
         # Optionally shuffle starting indices at the end of each epoch.
         if self.shuffle:
-            batch_indices = list(range(int(np.ceil(len(self.indices)/(self.batch_size*self.cache_size)))))
-            np.random.shuffle(batch_indices)
-            for i in batch_indices:
-                cache = self.indices[self.batch_size*self.cache_size*i:self.batch_size*self.cache_size*(i+1)]
-                np.random.shuffle(cache)
-                self.indices[self.batch_size*self.cache_size*i:self.batch_size*self.cache_size*(i+1)] = cache
+            np.random.shuffle(self.indices)
 
 """Обучение нейросети на множестве спектрограмм сигнала. N и M - количество точек по осям частоты и времени соответственно в обучающих выборках."""
 
@@ -336,7 +304,6 @@ class ISTFTLayer(tf.keras.layers.Layer):
             return (batch, self.sq_lngth)
         else:
             return (batch, None)
-
 
 # Helper layers to add and remove a singleton channel dimension.
 class AddInnerDim(tf.keras.layers.Layer):
@@ -455,12 +422,12 @@ def main():
     model = build_rnn_spectrogram_model(SQNC_LENGTH)
     model.summary()
     early_stopping = tf.keras.callbacks.EarlyStopping(monitor='loss', patience=5, restore_best_weights=True)
-    batch_size = 768
-    train_gen = AudioDataGenerator(wav_file_path1, wav_file_path, SQNC_LENGTH, batch_size=batch_size, cache_size=100, shuffle=True)
-    steps_per_epoch = (train_gen.nofsamples - SQNC_LENGTH) // (SQNC_LENGTH // 2 * batch_size)
+    #batch_size = 512
+    train_gen = AudioDataGenerator(wav_file_path, wav_file_path1, SQNC_LENGTH, batch_size=768, shuffle=True)
+    steps_per_epoch = (train_gen.nofsamples - SQNC_LENGTH) // (SQNC_LENGTH // 2 * 512)
     lr_scheduler = tf.keras.callbacks.LearningRateScheduler(scheduler)
     model.fit(train_gen,
-              epochs=20,
+              epochs=30,
               callbacks=[early_stopping,lr_scheduler])
 
     """Открытие файла который нужно восстановить и получение массива его спектрограмм. file_for_restoration_path - путь к файлу который нужно восстановить.
