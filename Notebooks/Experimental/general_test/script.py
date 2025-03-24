@@ -20,29 +20,26 @@ Original file is located at
 *   wav_file_path - путь до исходного файла (без клиппинга), его данные записываются в массив samples
 *   wav_file_path1 - путь до файла с клиппингом, его данные записываются в массив samples1
 """
-import wave_bwf_rf64
 import traceback
 import warnings
 import sys
-import struct
-import contextlib
 
-'''def warn_with_traceback(message, category, filename, lineno, file=None, line=None):
+def warn_with_traceback(message, category, filename, lineno, file=None, line=None):
 
     log = file if hasattr(file,'write') else sys.stderr
     traceback.print_stack(file=log)
-    log.write(warnings.formatwarning(message, category, filename, lineno, line))'''
+    log.write(warnings.formatwarning(message, category, filename, lineno, line))
 
-#warnings.showwarning = warn_with_traceback
-#warnings.simplefilter("always")
+warnings.showwarning = warn_with_traceback
+warnings.simplefilter("always")
 
 import os
 
 os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
-os.environ['CUDA_VISIBLE_DEVICES'] = "0"
 
-wav_file_path = "lecture_lngf.rf64"
-wav_file_path1 = "lecture_lngfс.rf64"
+
+wav_file_path = "podcastslong.wav"
+wav_file_path1 = "podcastslongc.wav"
 import wave
 import numpy as np
 from tensorflow.keras import backend as K
@@ -50,7 +47,7 @@ from tensorflow.keras.utils import Sequence
 
 
 def scheduler(epoch, lr):
-    if epoch < 20:
+    if epoch < 50:
         return lr
     else:
         return lr * 0.95
@@ -124,92 +121,27 @@ def write_float_samples_to_wav(samples, sample_rate, output_path):
         # Write the audio frames
         wav_file.writeframes(int_samples.tobytes())
 
-def get_number_of_samples(filename):
-    with contextlib.closing(wave_bwf_rf64.open(filename, 'rb')) as wf:
-        nframes = wf.getnframes()
-    return nframes
-
-def find_data_chunk_offset(filename):
-    """
-    Scans the RF64 file to find the offset of the 'data' chunk.
-    
-    Returns:
-      offset (int): The byte offset where the 'data' chunk's raw data begins.
-    """
-    with open(filename, "rb") as f:
-        # Read the header.
-        header = f.read(12)
-        if header[0:4] != b"RF64":
-            raise ValueError("Not an RF64 file.")
-        # Loop over the chunks.
-        while True:
-            chunk_header = f.read(8)
-            if len(chunk_header) < 8:
-                raise ValueError("Reached EOF without finding 'data' chunk.")
-            chunk_id = chunk_header[0:4]
-            # Unpack the chunk size as a little-endian unsigned int.
-            chunk_size = struct.unpack("<I", chunk_header[4:8])[0]
-            if chunk_id == b"data":
-                # The current file position is the start of the data.
-                offset = f.tell()
-                return offset
-            else:
-                # Skip this chunk.
-                # Some chunks might be padded to an even number of bytes.
-                f.seek(chunk_size, 1)
-
-def memmap_rf64(filename):
-    # Open the file with wave_bwf_rf64 to get header info.
-    with contextlib.closing(wave_bwf_rf64.open(filename, 'rb')) as wf:
-        sample_width = wf.getsampwidth()  # in bytes
-        num_channels = wf.getnchannels()
-        nframes = wf.getnframes()
-    
-    # Find the data chunk offset by scanning the file.
-    data_offset = find_data_chunk_offset(filename)
-    
-    # Map sample width (in bytes) to numpy dtype.
-    if sample_width == 1:
-        dtype = np.uint8   # 8-bit PCM is usually unsigned.
-    elif sample_width == 2:
-        dtype = np.int16
-    elif sample_width == 4:
-        dtype = np.int32
-    else:
-        raise ValueError(f"Unsupported sample width: {sample_width}")
-    
-    # Create a memmap of the file starting at the data chunk offset.
-    # The total number of samples is (nframes * num_channels).
-    shape = (nframes, num_channels)
-    mm = np.memmap(filename, dtype=dtype, mode='r', offset=data_offset, shape=shape)/(2**(sample_width*8-1))
-    return mm
-
 class AudioDataGenerator(Sequence):
     """
-    A Keras Sequence that loads entire RF64 files into RAM and generates batches of overlapping
-    audio sequences (with 50% overlap). Since all data are already in memory, __getitem__ only slices
-    preloaded arrays.
+    A Keras Sequence for generating batches of overlapping audio sequences.
+
+    This generator loads the entire audio files once, computes the starting indices
+    for sequences of length SQNC_LENGTH with 50% overlap, and yields batches of data.
     """
-    def __init__(self, original_file, clipped_file, SQNC_LENGTH, batch_size = 512, shuffle=True):
+    def __init__(self, original_file, clipped_file, SQNC_LENGTH, batch_size=32, shuffle=True):
+        self.samples = read_wav_as_float(original_file)
+        self.samples_clipped = read_wav_as_float(clipped_file)
         self.SQNC_LENGTH = SQNC_LENGTH
         self.batch_size = batch_size
+        self.step_size = SQNC_LENGTH // 2  # 50% overlap
+        # Compute starting indices for sequences
+        self.indices = list(range(0, len(self.samples) - SQNC_LENGTH + 1, self.step_size))
         self.shuffle = shuffle
-        self.ofname = original_file
-        self.cfname = clipped_file
-        # Get total number of sample frames from one of the files.
-        self.nofsamples = get_number_of_samples(original_file)
-        # Compute overlapping sequence starting indices (50% overlap)
-        self.step_size = SQNC_LENGTH // 2
-        self.indices = list(range(0, self.nofsamples - SQNC_LENGTH + 1, self.step_size))
-        #number of the latest sequence stored in cache
-        self.startindex = -1
-        self.endindex = -1
-        self.samples_orig = memmap_rf64(original_file)
-        self.samples_clip = memmap_rf64(clipped_file)
         if self.shuffle:
             np.random.shuffle(self.indices)
+
     def __len__(self):
-        # Return the number of batches per epoch.
+        # Number of batches per epoch is the total number of sequences divided by batch_size.
         return int(np.ceil(len(self.indices) / self.batch_size))
 
     def __getitem__(self, idx):
@@ -217,14 +149,11 @@ class AudioDataGenerator(Sequence):
         X_batch = []
         y_batch = []
         for i in batch_indices:
-            #X_batch.append(self.samples_clipped[i : i + self.SQNC_LENGTH])
-            #y_batch.append(self.samples[i : i + self.SQNC_LENGTH])
-            X_batch.append(self.samples_clip[i:i+self.SQNC_LENGTH])
-            y_batch.append(self.samples_orig[i:i+self.SQNC_LENGTH])
+            X_batch.append(self.samples_clipped[i : i + self.SQNC_LENGTH])
+            y_batch.append(self.samples[i : i + self.SQNC_LENGTH])
         return np.array(X_batch), np.array(y_batch)
 
     def on_epoch_end(self):
-        # Optionally shuffle starting indices at the end of each epoch.
         if self.shuffle:
             np.random.shuffle(self.indices)
 
@@ -305,6 +234,7 @@ class ISTFTLayer(tf.keras.layers.Layer):
         else:
             return (batch, None)
 
+
 # Helper layers to add and remove a singleton channel dimension.
 class AddInnerDim(tf.keras.layers.Layer):
     def call(self, x):
@@ -345,9 +275,9 @@ class SpectrogramModelLayer(tf.keras.layers.Layer):
         # Now we add an extra SimpleRNN layer before the existing SimpleRNN and a second Conv1D after the Dense.
         self.convout = tf.keras.layers.Conv1D(filters=32, kernel_size=3, activation='relu', padding='same')
         # New additional SimpleRNN layer (rnnout2)
-        self.rnnout2 = tf.keras.layers.SimpleRNN(units=32, activation='relu', return_sequences=True)
+        self.rnnout2 = tf.keras.layers.SimpleRNN(units=32, activation='linear', return_sequences=True)
         # Existing SimpleRNN layer (rnnout)
-        self.rnnout = tf.keras.layers.SimpleRNN(units=sq_lngth//2, activation='relu', return_sequences=True)
+        self.rnnout = tf.keras.layers.SimpleRNN(units=sq_lngth//2, activation='linear', return_sequences=True)
         # Change denseout to output 1 unit per timestep.
         self.denseout = tf.keras.layers.Dense(units=sq_lngth//2, activation='linear')
         # New additional Conv1D layer (convout2) before adding residual connection.
@@ -422,12 +352,12 @@ def main():
     model = build_rnn_spectrogram_model(SQNC_LENGTH)
     model.summary()
     early_stopping = tf.keras.callbacks.EarlyStopping(monitor='loss', patience=5, restore_best_weights=True)
-    #batch_size = 512
-    train_gen = AudioDataGenerator(wav_file_path, wav_file_path1, SQNC_LENGTH, batch_size=768, shuffle=True)
-    steps_per_epoch = (train_gen.nofsamples - SQNC_LENGTH) // (SQNC_LENGTH // 2 * 512)
+    batch_size = 512
+    train_gen = AudioDataGenerator(wav_file_path, wav_file_path1, SQNC_LENGTH, batch_size=batch_size, shuffle=True)
+    steps_per_epoch = (len(train_gen.samples) - SQNC_LENGTH) // (SQNC_LENGTH // 2 * batch_size)
     lr_scheduler = tf.keras.callbacks.LearningRateScheduler(scheduler)
     model.fit(train_gen,
-              epochs=30,
+              epochs=10,
               callbacks=[early_stopping,lr_scheduler])
 
     """Открытие файла который нужно восстановить и получение массива его спектрограмм. file_for_restoration_path - путь к файлу который нужно восстановить.
