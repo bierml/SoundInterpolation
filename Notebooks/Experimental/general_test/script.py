@@ -23,6 +23,8 @@ Original file is located at
 import traceback
 import warnings
 import sys
+import contextlib
+import wave_bwf_rf64
 
 def warn_with_traceback(message, category, filename, lineno, file=None, line=None):
 
@@ -37,9 +39,8 @@ import os
 
 os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
 
-
-wav_file_path = "podcastslong.wav"
-wav_file_path1 = "podcastslongc.wav"
+wav_file_path = "podcastslong.rf64"
+wav_file_path1 = "podcastslongс.rf64"
 import wave
 import numpy as np
 from tensorflow.keras import backend as K
@@ -121,41 +122,142 @@ def write_float_samples_to_wav(samples, sample_rate, output_path):
         # Write the audio frames
         wav_file.writeframes(int_samples.tobytes())
 
+def get_number_of_samples(filename):
+    with contextlib.closing(wave_bwf_rf64.open(filename, 'rb')) as wf:
+        nframes = wf.getnframes()
+    return nframes
+
+def read_samples_segment(filename, start_index, end_index):
+    """
+    Reads and returns samples from an RF64 file between the specified frame indices.
+    
+    Parameters:
+      filename (str): Path to the RF64 file.
+      start_index (int): Starting frame index (inclusive).
+      end_index (int): Ending frame index (exclusive).
+    
+    Returns:
+      np.ndarray: An array of audio samples (reshaped to (num_frames, num_channels) if multichannel).
+    """
+    with contextlib.closing(wave_bwf_rf64.open(filename, 'rb')) as wf:
+        nframes = wf.getnframes()
+        #print("indicies,frames:",start_index,end_index,nframes)
+        if start_index < 0 or end_index > nframes or start_index >= end_index:
+            raise ValueError("Invalid start or end index.")
+        
+        # Set the file pointer to the desired start frame.
+        wf.setpos(start_index)
+        # Read the desired number of frames.
+        frames = wf.readframes(end_index - start_index)
+        
+        sample_width = wf.getsampwidth()
+        num_channels = wf.getnchannels()
+        
+        # Map sample width (in bytes) to numpy dtype.
+        if sample_width == 1:
+            dtype = np.uint8  # usually unsigned
+        elif sample_width == 2:
+            dtype = np.int16
+        elif sample_width == 4:
+            dtype = np.int32
+        else:
+            raise ValueError(f"Unsupported sample width: {sample_width}")
+        
+        # Convert the raw bytes to a numpy array.
+        samples = np.frombuffer(frames, dtype=dtype)/(2**(sample_width*8-1))
+        if num_channels > 1:
+            samples = samples.reshape(-1, num_channels)
+        return samples
+    
 class AudioDataGenerator(Sequence):
     """
-    A Keras Sequence for generating batches of overlapping audio sequences.
-
-    This generator loads the entire audio files once, computes the starting indices
-    for sequences of length SQNC_LENGTH with 50% overlap, and yields batches of data.
+    A Keras Sequence that loads entire RF64 files into RAM and generates batches of overlapping
+    audio sequences (with 50% overlap). Since all data are already in memory, __getitem__ only slices
+    preloaded arrays.
     """
-    def __init__(self, original_file, clipped_file, SQNC_LENGTH, batch_size=32, shuffle=True):
-        self.samples = read_wav_as_float(original_file)
-        self.samples_clipped = read_wav_as_float(clipped_file)
+    def __init__(self, original_file, clipped_file, SQNC_LENGTH, batch_size = 32, cache_size = 100, shuffle=True):
         self.SQNC_LENGTH = SQNC_LENGTH
         self.batch_size = batch_size
-        self.step_size = SQNC_LENGTH // 2  # 50% overlap
-        # Compute starting indices for sequences
-        self.indices = list(range(0, len(self.samples) - SQNC_LENGTH + 1, self.step_size))
         self.shuffle = shuffle
+        self.ofname = original_file
+        self.cfname = clipped_file
+        self.cache_size = cache_size
+        # Get total number of sample frames from one of the files.
+        self.nofsamples = get_number_of_samples(original_file)
+        # Compute overlapping sequence starting indices (50% overlap)
+        self.step_size = SQNC_LENGTH // 2
+        self.indices = list(range(0, self.nofsamples - SQNC_LENGTH + 1, self.step_size))
+        #number of the latest sequence stored in cache
+        self.startindex = -1
+        self.endindex = -1
+        self.cache_samples_orig = []
+        self.cache_samples_clip = []
         if self.shuffle:
-            np.random.shuffle(self.indices)
+            for i in range(int(np.ceil(len(self.indices)/(self.batch_size*self.cache_size)))):
+                cache = self.indices[self.batch_size*self.cache_size*i:self.batch_size*self.cache_size*(i+1)]
+                np.random.shuffle(cache)
+                self.indices[self.batch_size*self.cache_size*i:self.batch_size*self.cache_size*(i+1)] = cache
 
     def __len__(self):
-        # Number of batches per epoch is the total number of sequences divided by batch_size.
+        # Return the number of batches per epoch.
         return int(np.ceil(len(self.indices) / self.batch_size))
 
     def __getitem__(self, idx):
-        batch_indices = self.indices[idx * self.batch_size : (idx + 1) * self.batch_size]
+        #print("idx=",idx)
+        #check if updating the cache is needed
+        if((idx//self.cache_size)*self.cache_size*self.batch_size != self.startindex):
+           #updating the cache
+           #number of batch for cache to start
+           cachestart_in_batch_num = (idx//self.cache_size)*self.cache_size
+           self.startindex = cachestart_in_batch_num*self.batch_size
+           #cache size in batches
+           cachesz = self.cache_size*self.batch_size
+           #add (cache size-1) to startindex to find actual last sequence in cache
+           self.endindex = self.startindex + cachesz - 1
+           #print(self.startindex,self.endindex)
+           #print("indicies before correction: ", self.startindex,self.endindex)
+           #idx - number of currently requested batch of sequences 
+           #startindex and endindex - indicies of the first (inclusively) and last (exclusively) sequences stored in cache
+           #example: 3627th sequence -> startindex = 3600, endindex = 3699 (for cachesize=100)
+           if(self.endindex > len(self.indices)-1):
+               self.endindex = len(self.indices)-1
+           #absolute index of cache starting sample in the whole file
+           fsqstartabsolute = self.startindex*self.step_size
+           #absolute index of the last cache sequence's start 
+           lsqstartabsolute = self.endindex*self.step_size
+           #absolute index of the last cache sequence's end
+           lsqendabsolute = lsqstartabsolute + self.SQNC_LENGTH - 1
+           self.cache_samples_orig = read_samples_segment(self.ofname,fsqstartabsolute,lsqendabsolute+1)
+           self.cache_samples_clip = read_samples_segment(self.cfname,fsqstartabsolute,lsqendabsolute+1)
+        # Get the global starting indices for this batch.
+        start_batch = idx * self.batch_size
+        end_batch = (idx + 1) * self.batch_size
+        if(end_batch>len(self.indices)-1):
+            end_batch= len(self.indices)-1
+        batch_indices = self.indices[start_batch : end_batch]
         X_batch = []
         y_batch = []
-        for i in batch_indices:
-            X_batch.append(self.samples_clipped[i : i + self.SQNC_LENGTH])
-            y_batch.append(self.samples[i : i + self.SQNC_LENGTH])
+        for start in batch_indices:
+            # Slice a contiguous sequence of length SQNC_LENGTH from the preloaded arrays.
+            #absolute index in the whole file where cache starts
+            cachestartabs = self.startindex*self.step_size
+            #print("idx:",idx)
+            X_seq = self.cache_samples_clip[start - cachestartabs : start - cachestartabs + self.SQNC_LENGTH]
+            y_seq = self.cache_samples_orig[start - cachestartabs : start - cachestartabs + self.SQNC_LENGTH]
+            X_batch.append(X_seq)
+            y_batch.append(y_seq)
+        # Convert list of sequences to NumPy arrays.
         return np.array(X_batch), np.array(y_batch)
 
     def on_epoch_end(self):
+        # Optionally shuffle starting indices at the end of each epoch.
         if self.shuffle:
-            np.random.shuffle(self.indices)
+            batch_indices = list(range(int(np.ceil(len(self.indices)/(self.batch_size*self.cache_size)))))
+            np.random.shuffle(batch_indices)
+            for i in batch_indices:
+                cache = self.indices[self.batch_size*self.cache_size*i:self.batch_size*self.cache_size*(i+1)]
+                np.random.shuffle(cache)
+                self.indices[self.batch_size*self.cache_size*i:self.batch_size*self.cache_size*(i+1)] = cache
 
 """Обучение нейросети на множестве спектрограмм сигнала. N и M - количество точек по осям частоты и времени соответственно в обучающих выборках."""
 
@@ -353,8 +455,8 @@ def main():
     model.summary()
     early_stopping = tf.keras.callbacks.EarlyStopping(monitor='loss', patience=5, restore_best_weights=True)
     batch_size = 512
-    train_gen = AudioDataGenerator(wav_file_path, wav_file_path1, SQNC_LENGTH, batch_size=batch_size, shuffle=True)
-    steps_per_epoch = (len(train_gen.samples) - SQNC_LENGTH) // (SQNC_LENGTH // 2 * batch_size)
+    train_gen = AudioDataGenerator(wav_file_path, wav_file_path1, SQNC_LENGTH, batch_size=batch_size, cache_size=100, shuffle=True)
+    #steps_per_epoch = (len(train_gen.samples) - SQNC_LENGTH) // (SQNC_LENGTH // 2 * batch_size)
     lr_scheduler = tf.keras.callbacks.LearningRateScheduler(scheduler)
     model.fit(train_gen,
               epochs=10,
