@@ -1,19 +1,16 @@
 import struct
-import random
 import numpy as np
-# --- User parameters ---
-source_file_path = "podcastslong.rf64"         # Path to the source RF64 file
-destination_file_path = "podcastslongс.rf64"    # Output file path
-clip_thrshd_db_min = 5          # e.g., clip at -10 dB (negative value)
-clip_thrshd_db_max = 15
-chunk_size = 44032                    # Number of bytes to process per chunk
 
-def db_to_multiplicator(dbvalue):
-    return 10 ** (-dbvalue / 20.0)
+# --- User parameters ---
+source_file_path = "output_vl.rf64"         # Path to the source RF64 file
+destination_file_path = "output_vlс.rf64"    # Output file path
+CLIPPING_THRESHOLD_DB = 10          # e.g., clip at -10 dB (negative value)
+chunk_size = 4096                    # Number of bytes to process per chunk
 
 # Compute amplitude multiplier:
 # For PCM, full-scale for 16-bit is 32768.
 # A threshold of -10 dB means amplitude factor = 10^(-10/20)
+MULTIPLICATOR = 10 ** (-CLIPPING_THRESHOLD_DB / 20.0)
 
 def read_chunk_header(f):
     hdr = f.read(8)
@@ -35,6 +32,7 @@ with open(source_file_path, 'rb') as fin:
     header_bytes = riff_header
     data_chunk_found = False
     data_chunk_size = None
+    extended_data_size = None  # Will hold the 64-bit data size from the ds64 chunk
 
     # Read chunks until we hit the "data" chunk.
     while not data_chunk_found:
@@ -45,6 +43,10 @@ with open(source_file_path, 'rb') as fin:
         if tag == b'ds64':
             ds64_data = fin.read(size)
             header_bytes += ds64_data
+            # Unpack first 24 bytes: riffSize, dataSize, sampleCount (all 64-bit little-endian)
+            if size >= 24:
+                riffSize_ext, data_size_ext, sample_count_ext = struct.unpack('<QQQ', ds64_data[:24])
+                extended_data_size = data_size_ext
         elif tag == b'fmt ':
             fmt_data = fin.read(size)
             header_bytes += fmt_data
@@ -63,6 +65,10 @@ with open(source_file_path, 'rb') as fin:
     if data_chunk_size is None:
         raise ValueError("Data chunk not found in source file")
 
+    # If data_chunk_size is 0xFFFFFFFF, use the extended 64-bit size.
+    if data_chunk_size == 0xFFFFFFFF and extended_data_size is not None:
+        data_chunk_size = extended_data_size
+
     print("Header length:", len(header_bytes))
     print("Data chunk size (bytes):", data_chunk_size)
 
@@ -76,23 +82,22 @@ with open(source_file_path, 'rb') as fin:
 
         # For 16-bit PCM, each sample is 2 bytes.
         full_scale = 32768
-        #print("Clip threshold (int):", clip_threshold)
+        clip_threshold = int(MULTIPLICATOR * full_scale)
+        print("Clip threshold (int):", clip_threshold)
 
         while bytes_remaining > 0:
-            dbval = random.uniform(clip_thrshd_db_min,clip_thrshd_db_max)
-            clip_threshold = int(db_to_multiplicator(dbval) * full_scale)
-            to_read = min(chunk_size, bytes_remaining)
+            # Ensure we read an even number of bytes (a multiple of 2)
+            to_read = (min(chunk_size, bytes_remaining) // 2) * 2
             raw_chunk = fin.read(to_read)
             if not raw_chunk:
                 break
-            # Convert raw bytes to a NumPy array.
-            # This example assumes 16-bit PCM.
+            # Convert raw bytes to a NumPy array (16-bit PCM).
             samples = np.frombuffer(raw_chunk, dtype=np.int16)
             # Clip the sample values.
             clipped = np.clip(samples, -clip_threshold, clip_threshold)
             # Write the processed chunk (as bytes) to the output.
             fout.write(clipped.tobytes())
             bytes_remaining -= len(raw_chunk)
-        # Do not copy trailing data: the header already contains all non-data chunks.
+        # Note: trailing non-audio data is not copied, as the header includes all non-data chunks.
 
 print("Processing complete. Processed file saved as:", destination_file_path)
