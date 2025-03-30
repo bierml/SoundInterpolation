@@ -1,16 +1,15 @@
 import struct
 import numpy as np
-
+import random
 # --- User parameters ---
-source_file_path = "output_vl.rf64"         # Path to the source RF64 file
-destination_file_path = "output_vlс.rf64"    # Output file path
-CLIPPING_THRESHOLD_DB = 10          # e.g., clip at -10 dB (negative value)
-chunk_size = 4096                    # Number of bytes to process per chunk
+source_file_path = "podcasts_21h.rf64"         # Path to the source RF64 file
+destination_file_path = "podcasts_21h_c.rf64"    # Output file path
+clip_thrshd_db_min = 5          # e.g., clip at -10 dB (negative value)
+clip_thrshd_db_max = 15
+chunk_size = 44032     
 
-# Compute amplitude multiplier:
-# For PCM, full-scale for 16-bit is 32768.
-# A threshold of -10 dB means amplitude factor = 10^(-10/20)
-MULTIPLICATOR = 10 ** (-CLIPPING_THRESHOLD_DB / 20.0)
+def db_to_multiplicator(dbvalue):
+    return 10 ** (-dbvalue / 20.0)
 
 def read_chunk_header(f):
     hdr = f.read(8)
@@ -82,10 +81,10 @@ with open(source_file_path, 'rb') as fin:
 
         # For 16-bit PCM, each sample is 2 bytes.
         full_scale = 32768
-        clip_threshold = int(MULTIPLICATOR * full_scale)
-        print("Clip threshold (int):", clip_threshold)
 
         while bytes_remaining > 0:
+            dbval = random.uniform(clip_thrshd_db_min,clip_thrshd_db_max)
+            clip_threshold = int(db_to_multiplicator(dbval) * full_scale)
             # Ensure we read an even number of bytes (a multiple of 2)
             to_read = (min(chunk_size, bytes_remaining) // 2) * 2
             raw_chunk = fin.read(to_read)
