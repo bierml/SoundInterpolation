@@ -29,13 +29,44 @@ import os
 
 os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
 
-wav_file_path = "podcasts_11h.rf64"
-wav_file_path1 = "podcasts_11h_c.rf64"
+wav_file_path = "podcasts_21h.rf64"
+wav_file_path1 = "podcasts_21h_c.rf64"
 import wave
 import numpy as np
 from tensorflow.keras import backend as K
 from tensorflow.keras.utils import Sequence
 from tensorflow.keras.callbacks import ReduceLROnPlateau, ModelCheckpoint
+from keras.layers import Multiply
+def snr_cost(s_estimate, s_true):
+    '''Static Method defining the cost function. 
+    The negative signal to noise ratio is calculated here. The loss is 
+    always calculated over the last dimension. 
+    '''
+   
+    # calculating the SNR
+    snr = tf.reduce_mean(tf.math.square(s_true), axis=-1, keepdims=True) / \
+    (tf.reduce_mean(tf.math.square(s_true-s_estimate), axis=-1, keepdims=True)+1e-7)
+    # using some more lines, because TF has no log10
+    num = tf.math.log(snr) 
+    denom = tf.math.log(tf.constant(10, dtype=num.dtype))
+    loss = -10*(num / (denom))
+    # returning the loss
+    return loss
+
+def lossWrapper():
+    '''
+    A wrapper function which returns the loss function. This is done to
+    to enable additional arguments to the loss function if necessary.
+    '''
+    def lossFunction(y_true,y_pred):
+        # calculating loss and squeezing single dimensions away
+        loss = tf.squeeze(snr_cost(y_pred,y_true))
+        # calculate mean over batches
+        loss = tf.reduce_mean(loss)
+        # return the loss
+        return loss
+    # returning the loss function as handle
+    return lossFunction
 
 def read_wav_as_float(file_path):
     """
@@ -381,8 +412,7 @@ class SpectrogramModelLayer(tf.keras.layers.Layer):
 
         # Process magnitude with Conv2D layers.
         x = self.conv1(mag)
-        x = self.conv2(x)  # x: (batch, F, T, 64)
-
+        x = self.conv2(x)
         batch_size = tf.shape(x)[0]
         # Reshape for RNN: treat frequency dimension (F) as timesteps; flatten T and channels.
         x = tf.reshape(x, [batch_size, self.F_const, self.M_const * 64])  # (batch, F, T*64)
@@ -393,7 +423,10 @@ class SpectrogramModelLayer(tf.keras.layers.Layer):
         x = self.rnn2(x)
         # Map each timestep to M_const outputs.
         x = self.dense(x)  # now x: (batch, F, M_const)
-
+        #x = self.add_inner(x)
+        mag_ = self.squeeze(mag)
+        x = mag_ + x
+	
         # Process phase: remove channel dimension → (batch, F, M_const)
         phase = self.squeeze(phase)
 
