@@ -69,6 +69,30 @@ def lossWrapper():
     # returning the loss function as handle
     return lossFunction
 
+def threshold_mask(reference,restored, threshold_ratio=0.95):
+    """
+    Create a binary mask for a numpy array based on the absolute maximum value.
+    
+    Parameters:
+        x (np.ndarray): Input array of float values.
+        threshold_ratio (float): Threshold ratio (default=0.95). Samples with an absolute value
+                                 greater than or equal to threshold_ratio times the absolute maximum
+                                 will be marked with 1, others with 0.
+    
+    Returns:
+        np.ndarray: A binary mask of the same shape as x.
+    """
+    abs_x = np.abs(reference)
+    max_val = np.max(abs_x)
+    
+    if max_val == 0:
+        # If the maximum is 0, return an array of zeros to avoid division by zero.
+        return np.zeros_like(reference, dtype=int)
+    
+    mask = (abs_x >= (threshold_ratio * max_val)).astype(int)
+    return (1-mask)*reference + restored*mask
+
+
 def read_wav_as_float(file_path):
     """
     Reads a WAV file and returns its samples as a NumPy array of float32 values.
@@ -404,11 +428,13 @@ class SpectrogramModelLayer(tf.keras.layers.Layer):
 
         # Process with two SimpleRNN layers.
         x = self.rnn1(x)
+        #x = self.dropout(x)
         x = self.rnn2(x)
         # Map each timestep to M_const outputs.
         x = self.dense(x)  # now x: (batch, F, M_const)
         #x = self.add_inner(x)
-	
+        #mag_ = self.squeeze(mag)
+        #x = mag_ + x
         # Process phase: remove channel dimension в†’ (batch, F, M_const)
         phase = self.squeeze(phase)
 
@@ -438,10 +464,10 @@ def main():
     model.summary()
     early_stopping = tf.keras.callbacks.EarlyStopping(monitor='loss', patience=20, restore_best_weights=True)
     batch_size = 32
-    train_gen = AudioDataGenerator(wav_file_path, wav_file_path1, SQNC_LENGTH, batch_size=batch_size, cache_size=20, shuffle=True)
+    train_gen = AudioDataGenerator(wav_file_path, wav_file_path1, SQNC_LENGTH, batch_size=batch_size, cache_size=100, shuffle=True)
     #steps_per_epoch = (len(train_gen.samples) - SQNC_LENGTH) // (SQNC_LENGTH // 2 * batch_size)
     checkpointer = ModelCheckpoint('model_checkpoint.keras',monitor='mse',verbose=1,save_best_only=True,save_weights_only=False,mode='min',save_freq='epoch')
-    reduce_lr = ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=2, min_lr=10**(-10), cooldown=1)
+    reduce_lr = ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=4, min_lr=10**(-10), cooldown=4)
     model.fit(train_gen,
               epochs=1000,
               callbacks=[early_stopping,reduce_lr,checkpointer])
@@ -455,7 +481,6 @@ def main():
     file_for_restoration_path = "1c.wav"
     samples_input_file = read_wav_as_float(file_for_restoration_path)
     j = 0
-    #SQNC_LENGTH = 512
     fs = 44100
     samples_input_sequences = []
     while j < len(samples_input_file ):
@@ -473,8 +498,6 @@ def main():
 
 
     """Для правильного восстановления нужны накладывающиеся последовательности семплов исходного файла. Для простоты возьмем степень наложения окон равной 0.5."""
-
-    #print(samples_restored)
     restored_samples_overlap = []
     overlap_input_sequences = []
     step_size = SQNC_LENGTH // 2
@@ -486,58 +509,22 @@ def main():
         if(j+step_size < len(samples_input_file)):
             overlap_input_sequences.append(samples_input_file[j:j+SQNC_LENGTH])
         j += step_size
+    overlap_input_sequences = np.array(overlap_input_sequences)
+    nn_restored = model.predict_on_batch(overlap_input_sequences)
+    i = 0
     for sqnc in overlap_input_sequences:
       if(max(sqnc)>(maxv*0.95) or min(sqnc)<(minv*0.95)):
-        elem = np.array(sqnc)
-        elem = np.expand_dims(elem, axis=0)  # Now shape is (1, SQNC_LENGTH)
-        res = model.predict(elem,verbose=0).flatten()
-        #print(res[SQNC_LENGTH//4:(SQNC_LENGTH*3)//4])
-        restored_samples_overlap.append(res[SQNC_LENGTH//4:(SQNC_LENGTH*3)//4])
+        restored = nn_restored[i][SQNC_LENGTH//4:(SQNC_LENGTH*3)//4]
+        reference = np.array(sqnc[SQNC_LENGTH//4:(SQNC_LENGTH*3)//4])
+        restored_samples_overlap.append(threshold_mask(reference, restored))
       else:
         restored_samples_overlap.append(np.array(sqnc[SQNC_LENGTH//4:(SQNC_LENGTH*3)//4]))
-
+      i += 1
     restored_samples_overlap = np.array(restored_samples_overlap).flatten()
     #print(type(restored_samples_overlap))
     print(restored_samples_overlap.shape)
-
-    """Если мы хотим произвести сравнение с каким-либо другим методом, возможно, возникнет проблема из-за разных длин файлов: текущий алгоритм отбрасывает последние сэмплы в файле чтобы достичь количества сэмплов кратного SQNC_LENGTH. Если раскомментировать вторую строку мы получим массив в котором недостающие восстановленные сэмплы заменены сэмплами исходного массива до требуемой длины, что обеспечит возможность сравнения файлов. output_path - название файла, в который будет записан вывод программы."""
-
-    #samples_restored_final = samples_restored
-    #for i in range(len(samples_restored_final)):
-      #print(type(samples_restored_final),len(samples_restored_final[i]))
-    import wave
-    import numpy as np
-
-    def write_float_samples_to_wav(samples, sample_rate, output_path):
-        """
-        Writes floating-point audio samples to a mono 16-bit WAV file.
-
-        Parameters:
-            samples (list or np.ndarray): Array of floating-point audio samples in the range [-1.0, 1.0].
-            sample_rate (int): Sample rate of the audio in Hz (e.g., 44100).
-            output_path (str): Path to save the output WAV file.
-        """
-        # Ensure the samples are a NumPy array
-        samples = np.array(samples, dtype=np.float32)
-
-        # Clip the samples to the range [-1.0, 1.0] to prevent overflow
-        samples = np.clip(samples, -1.0, 1.0)
-
-        # Convert to 16-bit PCM format
-        int_samples = (samples * 32767).astype(np.int16)
-
-        # Write to a WAV file
-        with wave.open(output_path, 'wb') as wav_file:
-            # Set the parameters for the WAV file
-            wav_file.setnchannels(1)  # Mono
-            wav_file.setsampwidth(2)  # 16-bit PCM
-            wav_file.setframerate(sample_rate)
-
-            # Write the audio frames
-            wav_file.writeframes(int_samples.tobytes())
-
-    output_path = 'output.wav'  # Path to save the WAV file
-
+    output_path = 'output12.wav'  # Path to save the WAV file
+    
     #write_float_samples_to_wav(samples_restored_final, fs, output_path)
     #print(f"WAV file written to {output_path}")
     restored_samples_overlap = np.array(restored_samples_overlap).flatten()
