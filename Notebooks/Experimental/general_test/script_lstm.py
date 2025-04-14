@@ -278,80 +278,6 @@ class AudioDataGenerator(Sequence):
 
 import tensorflow as tf
 FSTEP = 8
-# Custom STFT layer using tf.signal.stft
-class STFTLayer(tf.keras.layers.Layer):
-    def __init__(self, frame_length=8, frame_step=4, **kwargs):
-        super(STFTLayer, self).__init__(**kwargs)
-        self.frame_length = frame_length
-        self.frame_step = frame_step
-
-    def call(self, inputs):
-        # inputs: shape (batch, sq_lngth)
-        # Use a Hann window
-        window = tf.signal.hann_window(self.frame_length, dtype=inputs.dtype)
-        stft_result = tf.signal.stft(
-            inputs,
-            frame_length=self.frame_length,
-            frame_step=self.frame_step,
-            window_fn=lambda fl, dtype: window
-        )
-        # tf.signal.stft returns shape (batch, time_frames, fft_unique_bins)
-        # For our design, we want to use (batch, fft_unique_bins, time_frames)
-        magnitude = tf.abs(stft_result)
-        phase = tf.math.angle(stft_result)
-        # Transpose to shape (batch, fft_unique_bins, time_frames)
-        magnitude = tf.transpose(magnitude, perm=[0, 2, 1])
-        phase = tf.transpose(phase, perm=[0, 2, 1])
-        return magnitude, phase
-
-    def compute_output_shape(self, input_shape):
-        batch = input_shape[0]
-        if input_shape[1] is None:
-            return (batch, None, None), (batch, None, None)
-        # time_frames computed from signal length:
-        time_frames = (input_shape[1] - self.frame_length) // self.frame_step + 1
-        fft_bins = self.frame_length // 2 + 1
-        # After transposition, output shape becomes (batch, fft_bins, time_frames)
-        return (batch, fft_bins, time_frames), (batch, fft_bins, time_frames)
-
-
-# Custom inverse STFT layer using tf.signal.inverse_stft
-class ISTFTLayer(tf.keras.layers.Layer):
-    def __init__(self, frame_length=8, frame_step=4, sq_lngth=None, **kwargs):
-        super(ISTFTLayer, self).__init__(**kwargs)
-        self.frame_length = frame_length
-        self.frame_step = frame_step
-        self.sq_lngth = sq_lngth
-
-    def call(self, inputs):
-        # inputs: a list [mag, phase] with shapes (batch, F, T)
-        mag, phase = inputs
-	# tf.signal.inverse_stft expects input of shape (batch, time_frames, fft_unique_bins).
-	# So transpose mag and phase from (batch, F, T) to (batch, T, F):
-        mag_t = tf.transpose(mag, perm=[0, 2, 1])
-        phase_t = tf.transpose(phase, perm=[0, 2, 1])
-        phase_float = tf.cast(phase_t, tf.float32)
-        stft_complex = tf.cast(mag_t, tf.complex64) * tf.complex(tf.cos(phase_float), tf.sin(phase_float))
-        #stft_complex = tf.cast(mag_t, tf.complex64) * tf.exp(1j * tf.cast(phase_t, tf.complex64))
-        window = tf.signal.hann_window(self.frame_length, dtype=tf.float32)
-        reconstructed = tf.signal.inverse_stft(
-            stft_complex,
-            frame_length=self.frame_length,
-            frame_step=self.frame_step,
-            window_fn=lambda fl, dtype: window
-        )
-        if self.sq_lngth is not None:
-            reconstructed = reconstructed[:, :self.sq_lngth]
-        return reconstructed
-
-    def compute_output_shape(self, input_shape):
-        batch = input_shape[0][0]
-        if self.sq_lngth is not None:
-            return (batch, self.sq_lngth)
-        else:
-            return (batch, None)
-
-
 # Helper layers to add and remove a singleton channel dimension.
 class AddInnerDim(tf.keras.layers.Layer):
     def call(self, x):
@@ -371,17 +297,14 @@ class SpectrogramModelLayer(tf.keras.layers.Layer):
         # Frequency bins: frame_length//2 + 1 = FSTEP+1 (e.g. 9 if FSTEP=8)
         self.F_const = self.frame_step + 1  
         # Time frames computed from signal length:
-        self.M_const = (sq_lngth - self.frame_length) // self.frame_step + 1
-
+        self.M_const = sq_lngth // self.frame_step + 1
+        #print(self.M_const)
         # Instantiate custom STFT/ISTFT and helper layers.
-        self.stft_layer = STFTLayer(frame_length=self.frame_length, frame_step=self.frame_step)
-        self.istft_layer = ISTFTLayer(frame_length=self.frame_length, frame_step=self.frame_step, sq_lngth=sq_lngth)
         self.add_inner = AddInnerDim()
         self.squeeze = Squeeze()
 
         # Layers for processing the magnitude spectrogram.
         self.conv1 = tf.keras.layers.Conv2D(filters=64, kernel_size=(3, 3), activation='relu', padding='same')
-        self.conv2 = tf.keras.layers.Conv2D(filters=64, kernel_size=(3, 3), activation='relu', padding='same')
         self.rnn1 = tf.keras.layers.LSTM(units=sq_lngth, return_sequences=True)
         self.dropout = tf.keras.layers.Dropout(0.25)
         self.rnn2 = tf.keras.layers.LSTM(units=sq_lngth, return_sequences=True)
@@ -402,17 +325,13 @@ class SpectrogramModelLayer(tf.keras.layers.Layer):
 
     def call(self, inputs):
         # inputs: (batch, sq_lngth)
-        mag, phase = self.stft_layer(inputs)  # both: (batch, F, T)
-        # Crop to M_const time frames.
-        mag = mag[:, :, :self.M_const]
-        phase = phase[:, :, :self.M_const]
+        mag, phase = tf.keras.ops.stft(inputs,self.frame_length,self.frame_step,self.frame_length)
         # Add a singleton channel dimension (for Conv2D)
         mag = self.add_inner(mag)      # (batch, F, T, 1)
-        phase = self.add_inner(phase)  # (batch, F, T, 1)
+        #phase = self.add_inner(phase)  # (batch, F, T, 1)
 
         # Process magnitude with Conv2D layers.
         x = self.conv1(mag)
-        x = self.conv2(x)
         batch_size = tf.shape(x)[0]
         # Reshape for RNN: treat frequency dimension (F) as timesteps; flatten T and channels.
         x = tf.reshape(x, [batch_size, self.F_const, self.M_const * 64])  # (batch, F, T*64)
@@ -425,13 +344,13 @@ class SpectrogramModelLayer(tf.keras.layers.Layer):
         x = self.dense(x)  # now x: (batch, F, M_const)
         #x = self.add_inner(x)
         mag_ = self.squeeze(mag)
+        x = tf.keras.layers.Permute((2,1))(x)
         x = mag_ + x
-	
-        # Process phase: remove channel dimension → (batch, F, M_const)
-        phase = self.squeeze(phase)
-
+        #phase = tf.keras.layers.Permute((2,1))(phase)
+        #print(mag_.shape)
+        #print(x.shape)
         # Reconstruct time-domain signal via ISTFT.
-        reconstructed = self.istft_layer([x, phase])  # (batch, sq_lngth)
+        reconstructed = tf.keras.ops.istft([x,phase],self.frame_length,self.frame_step,self.frame_length)
 
         # === Post-ISTFT refinement block ===
         # Expand dims for Conv1D: (batch, sq_lngth, 1)
@@ -470,7 +389,7 @@ def main():
     # Assume SQNC_LENGTH, samples_sequences_clipped, and samples_sequences are defined.
     model = build_rnn_spectrogram_model(SQNC_LENGTH)
     model.summary()
-    early_stopping = tf.keras.callbacks.EarlyStopping(monitor='loss', patience=5, restore_best_weights=True)
+    early_stopping = tf.keras.callbacks.EarlyStopping(monitor='loss', patience=20, restore_best_weights=True)
     batch_size = 512
     train_gen = AudioDataGenerator(wav_file_path, wav_file_path1, SQNC_LENGTH, batch_size=batch_size, cache_size=20, shuffle=True)
     #steps_per_epoch = (len(train_gen.samples) - SQNC_LENGTH) // (SQNC_LENGTH // 2 * batch_size)
