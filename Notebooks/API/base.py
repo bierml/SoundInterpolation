@@ -14,21 +14,29 @@ from tensorflow.keras.utils import Sequence
 from tensorflow.keras.callbacks import ReduceLROnPlateau, ModelCheckpoint
 from keras.layers import Multiply
 SQNC_LENGTH = 512
-def snr_cost(s_estimate, s_true):
-    '''Static Method defining the cost function. 
-    The negative signal to noise ratio is calculated here. The loss is 
-    always calculated over the last dimension. 
-    '''
-   
-    # calculating the SNR
-    snr = tf.reduce_mean(tf.math.square(s_true), axis=-1, keepdims=True) / \
-    (tf.reduce_mean(tf.math.square(s_true-s_estimate), axis=-1, keepdims=True)+1e-7)
-    # using some more lines, because TF has no log10
-    num = tf.math.log(snr) 
-    denom = tf.math.log(tf.constant(10, dtype=num.dtype))
-    loss = -10*(num / (denom))
-    # returning the loss
-    return loss
+
+def threshold_mask(reference,restored, threshold_ratio=0.95):
+    """
+    Create a binary mask for a numpy array based on the absolute maximum value.
+    
+    Parameters:
+        x (np.ndarray): Input array of float values.
+        threshold_ratio (float): Threshold ratio (default=0.95). Samples with an absolute value
+                                 greater than or equal to threshold_ratio times the absolute maximum
+                                 will be marked with 1, others with 0.
+    
+    Returns:
+        np.ndarray: A binary mask of the same shape as x.
+    """
+    abs_x = np.abs(reference)
+    max_val = np.max(abs_x)
+    
+    if max_val == 0:
+        # If the maximum is 0, return an array of zeros to avoid division by zero.
+        return np.zeros_like(reference, dtype=int)
+    
+    mask = (abs_x >= (threshold_ratio * max_val)).astype(int)
+    return (1-mask)*reference + restored*mask
 
 def read_wav_as_float(file_path):
     """
