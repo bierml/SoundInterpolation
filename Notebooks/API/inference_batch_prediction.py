@@ -30,13 +30,10 @@ if __name__ == '__main__':
             model_for_load_path,
             custom_objects={
                 'SpectrogramModelLayer': SpectrogramModelLayer,
-                'STFTLayer': STFTLayer,
-                'ISTFTLayer': ISTFTLayer,
                 'AddInnerDim': AddInnerDim,
                 'Squeeze': Squeeze,
                 'InputLayer': CustomInputLayer,
                 'DTypePolicy': Policy,
-                'snr_cost': snr_cost
             }
         )
         
@@ -48,22 +45,33 @@ if __name__ == '__main__':
         maxv = np.max(np.array(samples_input_file))
         minv = np.min(np.array(samples_input_file))
         while j < len(samples_input_file):
-            if(j+step_size < len(samples_input_file)):
+            #print(j, j+SQNC_LENGTH-1)
+            if(j+SQNC_LENGTH < len(samples_input_file)):
                 overlap_input_sequences.append(samples_input_file[j:j+SQNC_LENGTH])
             j += step_size
         overlap_input_sequences = np.array(overlap_input_sequences)
         nn_restored = model.predict_on_batch(overlap_input_sequences)
         i = 0
         for sqnc in overlap_input_sequences:
-          if(max(sqnc)>(maxv*alpha) or min(sqnc)<(minv*alpha)):
-            restored_samples_overlap.append(nn_restored[i][SQNC_LENGTH//4:(SQNC_LENGTH*3)//4])
-          else:
+        if(max(sqnc)>(maxv*0.95) or min(sqnc)<(minv*0.95)):
+            restored = nn_restored[i][SQNC_LENGTH//4:(SQNC_LENGTH*3)//4]
+            reference = np.array(sqnc[SQNC_LENGTH//4:(SQNC_LENGTH*3)//4])
+            restored_samples_overlap.append(threshold_mask(reference, restored))
+        else:
             restored_samples_overlap.append(np.array(sqnc[SQNC_LENGTH//4:(SQNC_LENGTH*3)//4]))
-          i += 1
+        i += 1
         restored_samples_overlap = np.array(restored_samples_overlap).flatten()
+        print(restored_samples_overlap.shape)
+        output_path = 'output12.wav'  # Path to save the WAV file
+        
+        
+        add = len(samples_input_file) - SQNC_LENGTH//4 - restored_samples_overlap.shape[0]
         restored_samples_overlap = np.array(restored_samples_overlap).flatten()
         restored_samples_overlap = np.append(np.array(samples_input_file[0:SQNC_LENGTH//4]),restored_samples_overlap)
-        restored_samples_overlap = np.append(restored_samples_overlap,np.array(samples_input_file[-SQNC_LENGTH//4:]))
+        #restored_samples_overlap = np.append(restored_samples_overlap,np.array(samples_input_file[-SQNC_LENGTH//4:]))
+        restored_samples_overlap = np.append(restored_samples_overlap,np.array(samples_input_file[-add:]))
+        print(len(samples_input_file))
+        print(len(restored_samples_overlap))
         write_float_samples_to_wav(restored_samples_overlap, fs, output_path)
         print(f"WAV file written to {output_path}")
 
