@@ -59,7 +59,7 @@ if __name__ == '__main__':
                 restored_samples_overlap.append(threshold_mask(reference, restored, alpha))
             else:
                 restored_samples_overlap.append(np.array(sqnc[SQNC_LENGTH//4:(SQNC_LENGTH*3)//4]))
-        i += 1
+            i += 1
         restored_samples_overlap = np.array(restored_samples_overlap).flatten()
         
         
