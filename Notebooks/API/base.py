@@ -296,7 +296,7 @@ class SpectrogramModelLayer(tf.keras.layers.Layer):
         self.convout2 = tf.keras.layers.Conv1D(filters=1, kernel_size=3, activation='linear', padding='same')
     def call(self, inputs):
         # inputs: (batch, sq_lngth)
-        mag, phase = self.stft_layer(inputs)  # both: (batch, F, T)
+        mag, phase = tf.keras.ops.stft(inputs,self.frame_length,self.frame_step,self.frame_length)
         # Crop to M_const time frames.
         mag = mag[:, :, :self.M_const]
         phase = phase[:, :, :self.M_const]
@@ -324,7 +324,7 @@ class SpectrogramModelLayer(tf.keras.layers.Layer):
         phase = self.squeeze(phase)
 
         # Reconstruct time-domain signal via ISTFT.
-        reconstructed = self.istft_layer([x, phase])  # (batch, sq_lngth)
+        reconstructed = tf.keras.ops.istft([x,phase],self.frame_length,self.frame_step,self.frame_length)
 
         # === Post-ISTFT refinement block ===
         # Expand dims for Conv1D: (batch, sq_lngth, 1)
@@ -349,7 +349,8 @@ class SpectrogramModelLayer(tf.keras.layers.Layer):
         # Store the rnn_layer as its class name
         config.update({
             "sq_lngth": self.sq_lngth,
-            "rnn_layer": self.rnn_layer.__name__
+            "rnn_layer": self.rnn_layer.__name__,
+            'activation': self.activation
         })
         return config
 
