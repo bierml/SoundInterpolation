@@ -56,12 +56,11 @@ if __name__ == '__main__':
             if(max(sqnc)>(maxv*alpha) or min(sqnc)<(minv*alpha)):
                 restored = nn_restored[i][SQNC_LENGTH//4:(SQNC_LENGTH*3)//4]
                 reference = np.array(sqnc[SQNC_LENGTH//4:(SQNC_LENGTH*3)//4])
-                restored_samples_overlap.append(threshold_mask(reference, restored))
+                restored_samples_overlap.append(threshold_mask(reference, restored, alpha))
             else:
                 restored_samples_overlap.append(np.array(sqnc[SQNC_LENGTH//4:(SQNC_LENGTH*3)//4]))
         i += 1
         restored_samples_overlap = np.array(restored_samples_overlap).flatten()
-        output_path = 'output12.wav'  # Path to save the WAV file
         
         
         add = len(samples_input_file) - SQNC_LENGTH//4 - restored_samples_overlap.shape[0]
@@ -70,5 +69,6 @@ if __name__ == '__main__':
         restored_samples_overlap = np.append(restored_samples_overlap,np.array(samples_input_file[-add:]))
         write_float_samples_to_wav(restored_samples_overlap, fs, output_path)
         print(f"WAV file written to {output_path}")
+
 
 
