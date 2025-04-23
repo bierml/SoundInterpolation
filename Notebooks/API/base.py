@@ -316,6 +316,7 @@ class SpectrogramModelLayer(tf.keras.layers.Layer):
         x = self.rnn2(x)
         # Map each timestep to M_const outputs.
         x = self.dense(x)  # now x: (batch, F, M_const)
+        x = tf.keras.layers.Permute((2,1))(x)
         #x = self.add_inner(x)
         mag_ = self.squeeze(mag)
         x = mag_ + x
