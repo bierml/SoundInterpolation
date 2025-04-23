@@ -259,7 +259,7 @@ class Squeeze(tf.keras.layers.Layer):
 
 # Custom layer wrapping the entire spectrogram processing pipeline.
 class SpectrogramModelLayer(tf.keras.layers.Layer):
-    def __init__(self, sq_lngth, rnn_layer=tf.keras.layers.SimpleRNN, activation='relu',**kwargs):
+    def __init__(self, sq_lngth, rnn_layer=tf.keras.layers.SimpleRNN, activation='relu', **kwargs):
         super(SpectrogramModelLayer, self).__init__(**kwargs)
         self.sq_lngth = sq_lngth
         self.rnn_layer = rnn_layer
@@ -368,10 +368,10 @@ class SpectrogramModelLayer(tf.keras.layers.Layer):
         return cls(**config)
 
 # Now reimplement build_rnn_spectrogram_model using Sequential.
-def build_rnn_spectrogram_model(sq_lngth,layer):
+def build_rnn_spectrogram_model(sq_lngth,layer,activation):
     model = tf.keras.Sequential([
         tf.keras.layers.InputLayer(shape=(sq_lngth,)),
-        SpectrogramModelLayer(sq_lngth=sq_lngth,rnn_layer=layer)
+        SpectrogramModelLayer(sq_lngth=sq_lngth,rnn_layer=layer,activation=activation)
     ])
     model.compile(
         optimizer=tf.keras.optimizers.Adam(learning_rate=0.0001),
