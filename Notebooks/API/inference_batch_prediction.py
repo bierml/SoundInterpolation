@@ -53,12 +53,12 @@ if __name__ == '__main__':
         nn_restored = model.predict_on_batch(overlap_input_sequences)
         i = 0
         for sqnc in overlap_input_sequences:
-        if(max(sqnc)>(maxv*0.95) or min(sqnc)<(minv*0.95)):
-            restored = nn_restored[i][SQNC_LENGTH//4:(SQNC_LENGTH*3)//4]
-            reference = np.array(sqnc[SQNC_LENGTH//4:(SQNC_LENGTH*3)//4])
-            restored_samples_overlap.append(threshold_mask(reference, restored))
-        else:
-            restored_samples_overlap.append(np.array(sqnc[SQNC_LENGTH//4:(SQNC_LENGTH*3)//4]))
+            if(max(sqnc)>(maxv*alpha) or min(sqnc)<(minv*alpha)):
+                restored = nn_restored[i][SQNC_LENGTH//4:(SQNC_LENGTH*3)//4]
+                reference = np.array(sqnc[SQNC_LENGTH//4:(SQNC_LENGTH*3)//4])
+                restored_samples_overlap.append(threshold_mask(reference, restored))
+            else:
+                restored_samples_overlap.append(np.array(sqnc[SQNC_LENGTH//4:(SQNC_LENGTH*3)//4]))
         i += 1
         restored_samples_overlap = np.array(restored_samples_overlap).flatten()
         print(restored_samples_overlap.shape)
