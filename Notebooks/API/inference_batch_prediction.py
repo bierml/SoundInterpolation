@@ -32,6 +32,7 @@ if __name__ == '__main__':
                 'SpectrogramModelLayer': SpectrogramModelLayer,
                 'InputLayer': CustomInputLayer,
                 'DTypePolicy': Policy,
+                'mse_shortened': mse_shortened
             }
         )
         

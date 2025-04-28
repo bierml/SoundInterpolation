@@ -17,7 +17,7 @@ command = [
     "script.py",
     "1.rf64",
     "1c.rf64",
-    "32"
+    "512"
 ]
 # Open the process with line-buffered output.
 process = subprocess.Popen(

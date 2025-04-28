@@ -7,7 +7,7 @@ if __name__ == '__main__':
         wav_file_path1 = sys.argv[2]
         # Example usage:
         # Assume SQNC_LENGTH, samples_sequences_clipped, and samples_sequences are defined.
-        model = build_rnn_spectrogram_model(SQNC_LENGTH,tf.keras.layers.SimpleRNN)
+        model = build_rnn_spectrogram_model(SQNC_LENGTH,tf.keras.layers.SimpleRNN,'relu')
         model.summary()
         early_stopping = tf.keras.callbacks.EarlyStopping(monitor='loss', patience=20, restore_best_weights=True)
         batch_size = int(sys.argv[3])
