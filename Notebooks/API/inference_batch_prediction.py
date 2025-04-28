@@ -30,8 +30,6 @@ if __name__ == '__main__':
             model_for_load_path,
             custom_objects={
                 'SpectrogramModelLayer': SpectrogramModelLayer,
-                'AddInnerDim': AddInnerDim,
-                'Squeeze': Squeeze,
                 'InputLayer': CustomInputLayer,
                 'DTypePolicy': Policy,
             }
