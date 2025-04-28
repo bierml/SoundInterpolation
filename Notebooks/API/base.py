@@ -4,7 +4,7 @@ import sys
 import contextlib
 import wave_bwf_rf64
 import os
-
+from random import shuffle, seed
 os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
 
 import wave

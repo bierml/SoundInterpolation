@@ -3,6 +3,10 @@ if __name__ == '__main__':
     if(len(sys.argv)<4):
         print('No enough arguments passed!')
     else:
+        os.environ['PYTHONHASHSEED']=str(42)
+        seed(42)
+        np.random.seed(42)
+        tf.random.set_seed(42)
         wav_file_path = sys.argv[1]
         wav_file_path1 = sys.argv[2]
         # Example usage:
