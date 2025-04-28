@@ -15,6 +15,10 @@ from tensorflow.keras.callbacks import ReduceLROnPlateau, ModelCheckpoint
 from keras.layers import Multiply
 SQNC_LENGTH = 512
 
+def mse_shortened(s_estimate, s_true):
+    mse_shortened = tf.reduce_mean(tf.math.square(s_true[...,64:-64]-s_estimate[...,64:-64]))
+    return mse_shortened
+
 def threshold_mask(reference,restored, threshold_ratio=0.95):
     """
     Create a binary mask for a numpy array based on the absolute maximum value.
@@ -95,7 +99,7 @@ def write_float_samples_to_wav(samples, sample_rate, output_path):
     samples = np.clip(samples, -1.0, 1.0)
 
     # Convert to 16-bit PCM format
-    int_samples = (samples * 32767).astype(np.int16)
+    int_samples = (samples * 32768).astype(np.int16)
 
     # Write to a WAV file
     with wave.open(output_path, 'wb') as wav_file:
@@ -248,14 +252,6 @@ class AudioDataGenerator(Sequence):
 
 import tensorflow as tf
 FSTEP = 8
-# Helper layers to add and remove a singleton channel dimension.
-class AddInnerDim(tf.keras.layers.Layer):
-    def call(self, x):
-        return tf.expand_dims(x, axis=-1)
-
-class Squeeze(tf.keras.layers.Layer):
-    def call(self, x):
-        return tf.squeeze(x, axis=-1)
 
 # Custom layer wrapping the entire spectrogram processing pipeline.
 class SpectrogramModelLayer(tf.keras.layers.Layer):
@@ -271,17 +267,13 @@ class SpectrogramModelLayer(tf.keras.layers.Layer):
         # Time frames computed from signal length:
         self.M_const = sq_lngth // self.frame_step + 1
 
-        # Instantiate custom STFT/ISTFT and helper layers.
-        self.add_inner = AddInnerDim()
-        self.squeeze = Squeeze()
-
+        self.rnn = self.rnn_layer(units=sq_lngth, activation=self.activation, return_sequences=True)
+        self.rnn_s = self.rnn_layer(units=sq_lngth, activation=self.activation, return_sequences=True)
         # Layers for processing the magnitude spectrogram.
-        self.conv1 = tf.keras.layers.Conv2D(filters=64, kernel_size=(3, 3), activation='relu', padding='same')
-        self.rnn1 = self.rnn_layer(units=sq_lngth, activation=self.activation, return_sequences=True)
+        self.rnn1 = tf.keras.layers.Bidirectional(self.rnn,merge_mode="ave")
         self.dropout = tf.keras.layers.Dropout(0.25)
-        self.rnn2 = self.rnn_layer(units=sq_lngth, activation=self.activation, return_sequences=True)
-        self.dense = tf.keras.layers.Dense(units=self.M_const, activation='linear')
-
+        self.rnn2 = tf.keras.layers.Bidirectional(self.rnn_s,merge_mode="ave")
+        self.dense = tf.keras.layers.Dense(units=self.F_const, activation='linear')
         # Post-ISTFT refinement block:
         # Original pipeline: Conv1D -> SimpleRNN -> Dense -> (residual addition)
         # Now we add an extra SimpleRNN layer before the existing SimpleRNN and a second Conv1D after the Dense.
@@ -294,36 +286,20 @@ class SpectrogramModelLayer(tf.keras.layers.Layer):
         self.denseout = tf.keras.layers.Dense(units=sq_lngth//2, activation='linear')
         # New additional Conv1D layer (convout2) before adding residual connection.
         self.convout2 = tf.keras.layers.Conv1D(filters=1, kernel_size=3, activation='linear', padding='same')
+
     def call(self, inputs):
         # inputs: (batch, sq_lngth)
         mag, phase = tf.keras.ops.stft(inputs,self.frame_length,self.frame_step,self.frame_length)
-        # Crop to M_const time frames.
-        mag = mag[:, :, :self.M_const]
-        phase = phase[:, :, :self.M_const]
         # Add a singleton channel dimension (for Conv2D)
-        mag = self.add_inner(mag)      # (batch, F, T, 1)
-        phase = self.add_inner(phase)  # (batch, F, T, 1)
-
+        batch_size = tf.shape(mag)[0]
         # Process magnitude with Conv2D layers.
-        x = self.conv1(mag)
-        batch_size = tf.shape(x)[0]
-        # Reshape for RNN: treat frequency dimension (F) as timesteps; flatten T and channels.
-        x = tf.reshape(x, [batch_size, self.F_const, self.M_const * 64])  # (batch, F, T*64)
-
-        # Process with two SimpleRNN layers.
-        x = self.rnn1(x)
+        #x = self.norm(mag)
+        x = self.rnn1(mag)
         x = self.dropout(x)
         x = self.rnn2(x)
         # Map each timestep to M_const outputs.
         x = self.dense(x)  # now x: (batch, F, M_const)
-        x = tf.keras.layers.Permute((2,1))(x)
-        #x = self.add_inner(x)
-        mag_ = self.squeeze(mag)
-        x = mag_ + x
-	
-        # Process phase: remove channel dimension → (batch, F, M_const)
-        phase = self.squeeze(phase)
-
+        x = mag + x
         # Reconstruct time-domain signal via ISTFT.
         reconstructed = tf.keras.ops.istft([x,phase],self.frame_length,self.frame_step,self.frame_length)
 
@@ -334,6 +310,7 @@ class SpectrogramModelLayer(tf.keras.layers.Layer):
         rec_proc1 = self.convout(reconstructed)  # (batch, sq_lngth, 32)
         # New additional SimpleRNN layer.
         rec_proc = self.rnnout2(rec_proc1)       # (batch, sq_lngth, 32)
+        rec_proc = self.dropout(rec_proc)
         # Existing SimpleRNN layer.
         rec_proc = self.rnnout(rec_proc)          # (batch, sq_lngth, sq_lngth//2)
         # TimeDistributed Dense to map each timestep to 1 feature.
@@ -342,6 +319,7 @@ class SpectrogramModelLayer(tf.keras.layers.Layer):
         rec_proc = self.convout2(rec_proc)        # (batch, sq_lngth, 1)
         rec_proc = tf.squeeze(rec_proc, axis=-1)  # (batch, sq_lngth)
         # === End refinement block ===
+
         # Residual connection.
         return inputs + rec_proc
     
@@ -374,8 +352,8 @@ def build_rnn_spectrogram_model(sq_lngth,layer,activation):
         SpectrogramModelLayer(sq_lngth=sq_lngth,rnn_layer=layer,activation=activation)
     ])
     model.compile(
-        optimizer=tf.keras.optimizers.Adam(learning_rate=0.0001),
-        loss='mse',
+        optimizer=tf.keras.optimizers.AdamW(learning_rate=0.0001,weight_decay=0.01),
+        loss=mse_shortened,
         metrics=['mse']
     )
     return model
