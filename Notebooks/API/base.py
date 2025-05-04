@@ -1,142 +1,119 @@
-import traceback
-import warnings
 import sys
 import contextlib
-import wave_bwf_rf64
+import wave_bwf_rf64  #модуль wave-bwf-rf64 для работы с медиаконтейнером RIFF 64
 import os
 from random import shuffle, seed
-os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
+os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'  #отключить кастомные OneDNN операции
 
 import wave
 import numpy as np
-from tensorflow.keras import backend as K
 from tensorflow.keras.utils import Sequence
-from tensorflow.keras.callbacks import ReduceLROnPlateau, ModelCheckpoint
-from keras.layers import Multiply
-SQNC_LENGTH = 512
+from tensorflow.keras.callbacks import ModelCheckpoint
+SQNC_LENGTH = 512   #длина входной и выходной последовательностей нейросети
 
+#функция для расчета MSE только для SQNC_LENGTH семплов в середине входной последовательности
+#s_estimate - результат восстановления нейросети
+#s_true - исходная последовательность без искажений
+#возвращаемое значение - значение MSE для SQNC_LENGTH//2 семплов в середине последовательностей
 def mse_shortened(s_estimate, s_true):
+    #отбрасываем по 64 семпла с каждого конца обеих последовательностей и находим MSE результирующих последовательностей
     mse_shortened = tf.reduce_mean(tf.math.square(s_true[...,64:-64]-s_estimate[...,64:-64]))
     return mse_shortened
 
+#функция для маскирования последовательностей с клиппингом и восстановленных нейросетью последовательностей
+#reference - исходная последовательность с клиппингом
+#restored - восстановленная нейростеью последовательность
+#threshold_ratio - относительный порог фиксации клиппинга (по умолчанию - 95% абсолютного пикового значения)
+#возвращаемое значение - маскированная последовательность, в которой в позициях без клиппинга использованы семплы из reference, где он есть - семплы из restored
 def threshold_mask(reference,restored, threshold_ratio=0.95):
-    """
-    Create a binary mask for a numpy array based on the absolute maximum value.
-    
-    Parameters:
-        x (np.ndarray): Input array of float values.
-        threshold_ratio (float): Threshold ratio (default=0.95). Samples with an absolute value
-                                 greater than or equal to threshold_ratio times the absolute maximum
-                                 will be marked with 1, others with 0.
-    
-    Returns:
-        np.ndarray: A binary mask of the same shape as x.
-    """
-    abs_x = np.abs(reference)
-    max_val = np.max(abs_x)
-    
-    if max_val == 0:
-        # If the maximum is 0, return an array of zeros to avoid division by zero.
-        return np.zeros_like(reference, dtype=int)
-    
-    mask = (abs_x >= (threshold_ratio * max_val)).astype(int)
-    return (1-mask)*reference + restored*mask
+    abs_x = np.abs(reference)   
+    max_val = np.max(abs_x) #находим абсолютный максимум последовательности с клиппингом
+    mask = (abs_x >= (threshold_ratio * max_val)).astype(int)  #маскирование по относительному порогу: 1 - клиппинг текущего семпла обнаружен, 0 - в противном случае
+    return (1-mask)*reference + restored*mask  #маска = 1 - используем семпл из restored, маска = 0 - семпл из reference
 
+#функция для чтения WAV-файла и возвращения его семплов как NumPy массива нормированных семплов в виде значений типа float32
+#file_path - путь к открываемому файлу
+#возвращаемое значение - массив нормированных (значения на отрезке [-1,1]) семплов файла
 def read_wav_as_float(file_path):
-    """
-    Reads a WAV file and returns its samples as a NumPy array of float32 values.
-
-    Parameters:
-        file_path (str): Path to the WAV file.
-
-    Returns:
-        np.ndarray: An array of float32 samples in the range [-1.0, 1.0].
-    """
     with wave.open(file_path, 'rb') as wav_file:
-        # Get parameters
+        #получить параметры из заголовка открываемого файла: количество каналов, количество байт на семпл, количество семплов, частота дискретизации
         n_channels = wav_file.getnchannels()
         sample_width = wav_file.getsampwidth()
         n_frames = wav_file.getnframes()
         frame_rate = wav_file.getframerate()
         print(f"Channels: {n_channels}, Sample Width: {sample_width}, Frame Rate: {frame_rate}, Frames: {n_frames}")
 
-        # Read frames as bytes
+        #прочесть данные исходного файла как массив значений байтов
         raw_data = wav_file.readframes(n_frames)
 
-    # Determine the data type based on sample width
+    #определить тип данных отдельного семпла на основании количества байт на семпл: 1 байт - np.int8, 2 байта - np.int16 и т.д.
     dtype = {1: np.int8, 2: np.int16, 4: np.int32}.get(sample_width)
     if dtype is None:
         raise ValueError(f"Unsupported sample width: {sample_width}")
 
-    # Convert raw bytes to numpy array without copying data
+    #конвертировать массив сырых байтов в массив значений заданного типа 
     int_data = np.frombuffer(raw_data, dtype=dtype)
 
-    # Convert to float32 and normalize to range [-1.0, 1.0]
-    max_val = float(2 ** (8 * sample_width - 1))
+    #нормировать массив значений семплов, чтобы итоговые значения лежали в диапазоне [-1,1]
+    max_val = float(2 ** (8 * sample_width - 1))  #максимальное значение семпла в знаковой PCM-модуляции когда на один семпл приходится sample_width байт 
     float_data = int_data.astype(np.float32) / max_val
 
-    # Handle multi-channel audio by averaging channels
+    #если файл содержит несколько каналов - усреднить их значения и преобразовать результат в один канал
     if n_channels > 1:
         float_data = float_data.reshape(-1, n_channels).mean(axis=1)
 
     return float_data
 
-"""Функция для записи массива в файл по пути output_path."""
-
+#функция для записи нормированных значений семплов в 16-битный одноканальный WAV-файл
+#samples - массив нормированных на отрезке [-1,1] семплов звукового файла
+#sample_rate - частота дискретизации звуковой дорожки
+#output_path - путь по которому будет записан звуковой файл
+#возвращаемое значение - отсутствует
 def write_float_samples_to_wav(samples, sample_rate, output_path):
-    """
-    Writes floating-point audio samples to a mono 16-bit WAV file.
-
-    Parameters:
-        samples (list or np.ndarray): Array of floating-point audio samples in the range [-1.0, 1.0].
-        sample_rate (int): Sample rate of the audio in Hz (e.g., 44100).
-        output_path (str): Path to save the output WAV file.
-    """
-    # Ensure the samples are a NumPy array
+    #преобразовать массив семплов в массив NumPy
     samples = np.array(samples, dtype=np.float32)
 
-    # Clip the samples to the range [-1.0, 1.0] to prevent overflow
+    #ограничиваем значения в массиве samples отрезком [-1,1] чтобы избежать переполнения
     samples = np.clip(samples, -1.0, 1.0)
 
-    # Convert to 16-bit PCM format
+    #конвертировать массив семплов в формат 16-битной PCM 
     int_samples = (samples * 32768).astype(np.int16)
 
-    # Write to a WAV file
+    #записать семплы в 16-битный одноканальный WAV-файл
     with wave.open(output_path, 'wb') as wav_file:
-        # Set the parameters for the WAV file
-        wav_file.setnchannels(1)  # Mono
-        wav_file.setsampwidth(2)  # 16-bit PCM
-        wav_file.setframerate(sample_rate)
+        #установить параметры WAV-файла
+        wav_file.setnchannels(1)  # Один канал
+        wav_file.setsampwidth(2)  # 16-битная PCM
+        wav_file.setframerate(sample_rate)  #установить частоту дискретизации равную sample_rate
 
-        # Write the audio frames
+        #записать семплы в аудио-файл
         wav_file.writeframes(int_samples.tobytes())
 
+#прочитать количество семплов из заголовка WAV-файла с медиаконтейнером RIFF 64
+#filename - имя файла для чтения
+#возвращаемое значение - количество семплов в WAV-файле
 def get_number_of_samples(filename):
     with contextlib.closing(wave_bwf_rf64.open(filename, 'rb')) as wf:
         nframes = wf.getnframes()
     return nframes
-
+    
+#функция чтения непрерывной последовательности семплов из WAV-файла с медиаконтейнером RIFF 64
+#filename - путь к открываемому WAV-файлу
+#start_index - индекс первого семпла читаемой последовательности (включительно - индекс первого семпла в последовательности = start_index)
+#end_index - индекс последнего семпла читаемой последовательности (не включительно, т.е. реальный индекс последнего семпла = end_index-1)
+#возвращаемое значение - нормированная на отрезке [-1,1] последовательность семплов файла начиная с start_index (первый семпл) и заканчивая end_index-1 (последний семпл)
 def read_samples_segment(filename, start_index, end_index):
-    """
-    Reads and returns samples from an RF64 file between the specified frame indices.
-    
-    Parameters:
-      filename (str): Path to the RF64 file.
-      start_index (int): Starting frame index (inclusive).
-      end_index (int): Ending frame index (exclusive).
-    
-    Returns:
-      np.ndarray: An array of audio samples (reshaped to (num_frames, num_channels) if multichannel).
-    """
+    #открыть файл в двоичном режиме для чтения
     with contextlib.closing(wave_bwf_rf64.open(filename, 'rb')) as wf:
+        #извлечь из файла количество семплов в нем
         nframes = wf.getnframes()
-        #print("indicies,frames:",start_index,end_index,nframes)
+        #индекс семпла выходит за границы массива семплов файла - выбросить исключение
         if start_index < 0 or end_index > nframes or start_index >= end_index:
             raise ValueError("Invalid start or end index.")
         
-        # Set the file pointer to the desired start frame.
+        #установить указатель в позицию начала читаемой последовательности
         wf.setpos(start_index)
-        # Read the desired number of frames.
+        #прочитать нужное количество семплов из файла в массив frames
         frames = wf.readframes(end_index - start_index)
         
         sample_width = wf.getsampwidth()
