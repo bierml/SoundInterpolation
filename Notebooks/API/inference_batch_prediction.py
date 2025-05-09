@@ -3,15 +3,15 @@ import tensorflow as tf
 from tensorflow.keras.mixed_precision import Policy
 from tensorflow.keras.utils import custom_object_scope
 if __name__ == '__main__':
-    #передано меньше 4 аргументов - выводим сообщение об ошибке
-    if(len(sys.argv)<5):
+    #передано меньше 5 аргументов - выводим сообщение об ошибке
+    if(len(sys.argv)<6):
         print('No enough arguments passed!')
     else:
         model_for_load_path = sys.argv[1] #путь к загружаемому файлу обученной модели
         file_for_restoration_path = sys.argv[2] #путь к восстанавливаемому WAV-файлу
         output_path = sys.argv[3]  #путь сохранения восстановленного WAV-файла
         alpha = float(sys.argv[4]) #относительный порог фиксации клиппинга - действительное число на интервале (0,1)
-        
+        T = float(sys.argv[5])  #порог маскирования спектрограммы при очищении файла от остаточных шумов
         #класс, используемый для корретной загрузки входного слоя (отбрасывание измерения, отвечающего за размер пачки) 
         class CustomInputLayer(tf.keras.layers.InputLayer):
             @classmethod
@@ -31,8 +31,7 @@ if __name__ == '__main__':
             custom_objects={
                 'SpectrogramModelLayer': SpectrogramModelLayer,
                 'InputLayer': CustomInputLayer,
-                'DTypePolicy': Policy,
-                'mse_shortened': mse_shortened
+                'DTypePolicy': Policy
             }
         )
 
@@ -54,6 +53,14 @@ if __name__ == '__main__':
             j += step_size
         overlap_input_sequences = np.array(overlap_input_sequences)
         nn_restored = model.predict_on_batch(overlap_input_sequences) #восстановление массива последовательностей с помощью загруженной нейросети
+        #если T = 0, маскирование ничего не изменяет
+        if(T>0.0001):
+          nn_restored = nn_restored.flatten()  #приведение к одномерному массиву
+          nn_restored = tf.signal.stft(nn_restored,256,128,256)  #дискретное оконное преобразование Фурье, размер преобразования - 256, шаг - 128, окно Хэмминга (наложение 50% + окно Хэмминга - NOLA, обеспечивается инвертируемость)
+          nn_restored = mask_stft_amplitude(nn_restored,T)  #маскирование спектрограммы для удаления остаточных шумов, оставляемых нейросетью
+          nn_restored = tf.signal.inverse_stft(nn_restored,256,128,256,window_fn=tf.signal.inverse_stft_window_fn(128)) #инвертирование дискретного окнного преобразования Фурье
+          nn_restored = np.array(nn_restored)
+          nn_restored = nn_restored.reshape(nn_restored.shape[0]//SQNC_LENGTH,SQNC_LENGTH)  #приведение данных обратно к двумерному массиву
         i = 0
         #получение окончательного результата восстановления - где нет клиппинга берем семпды из восстанавливаемого файла, где есть - результаты работы нейросети
         for sqnc in overlap_input_sequences:
