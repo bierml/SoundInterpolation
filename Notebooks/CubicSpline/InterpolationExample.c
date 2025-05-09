@@ -178,13 +178,21 @@ void process_buffer(float* buffer, int buffer_length, float threshold) {
 	for (int i = SLOPE_LENGTH; i < last_sample; i++) {
 		if (fabsf(buffer[i]) >= threshold) {
 			if (fabsf(buffer[i - 1]) < threshold) {
-				exit_list_ptr = realloc(exit_list_ptr, (exit_count + 1) * sizeof(int));
+				if( (exit_list_ptr = realloc(exit_list_ptr, (exit_count + 1) * sizeof(int))) == NULL) {
+					printf("Error while reallocating in exit_list_ptr!\n");
+					free(exit_list_ptr);
+					exit(1);
+				}
 				exit_list_ptr[exit_count++] = i - 1;
 			}
 		}
 		else {
 			if (fabsf(buffer[i - 1]) >= threshold) {
-				return_list_ptr = realloc(return_list_ptr, (return_count + 1) * sizeof(int));
+				if( (return_list_ptr = realloc(return_list_ptr, (return_count + 1) * sizeof(int))) == NULL) {
+					printf("Error while reallocating in return_list_ptr!\n");
+					free(return_list_ptr);
+					exit(1);
+				}
 				return_list_ptr[return_count++] = i;
 			}
 		}
