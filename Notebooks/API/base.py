@@ -281,8 +281,8 @@ class SpectrogramModelLayer(tf.keras.layers.Layer):
         self.dense = tf.keras.layers.Dense(units=self.F_const, activation='linear') #полносвязный слой 
         #слои, используемые для преобразования сигнала во временной области
         self.convout = tf.keras.layers.Conv1D(filters=32, kernel_size=3, activation='relu', padding='same')  #сверточный слой с relu-активацей, 32 фильтра
-        self.rnnout2 = self.rnn_layer(units=32, activation=self.activation, return_sequences=True)  #рекуррентный слой из 32 нейронов
-        self.rnnout = self.rnn_layer(units=sq_lngth//2, activation=self.activation, return_sequences=True)  #рекуррентный слой из sq_lngth//2 нейронов
+        self.rnnout = self.rnn_layer(units=32, activation=self.activation, return_sequences=True)  #рекуррентный слой из 32 нейронов
+        self.rnnout2 = self.rnn_layer(units=sq_lngth//2, activation=self.activation, return_sequences=True)  #рекуррентный слой из sq_lngth//2 нейронов
         self.denseout = tf.keras.layers.Dense(units=sq_lngth//2, activation='linear') #полносвязный слой из sq_lngth//2 нейронов
         self.convout2 = tf.keras.layers.Conv1D(filters=1, kernel_size=3, activation='linear', padding='same')  #сверточный слой для устранения искажений во временной области
     #функция восстановления сигнала с помощью разработанной нейросети
@@ -313,9 +313,9 @@ class SpectrogramModelLayer(tf.keras.layers.Layer):
         #сверточный слой, преобразует форму сигнала (batch_size, self.sq_lngth, 1)->(batch, self.sq_lngth, 32), т.е. добавляется избыточность
         rec_proc1 = self.convout(reconstructed)  
         #преобразуем входные данные через рекуррентные слои 
-        rec_proc = self.rnnout2(rec_proc1)    #(batch, self.sq_lngth, 32)->(batch, self.sq_lngth, 32), степень избыточности та же
+        rec_proc = self.rnnout(rec_proc1)    #(batch, self.sq_lngth, 32)->(batch, self.sq_lngth, 32), степень избыточности та же
         rec_proc = self.dropout(rec_proc)     #отбрасываем часть нейронов при градиентном спуске чтобы избежать переобучения
-        rec_proc = self.rnnout(rec_proc)  #(batch, self.sq_lngth, 32)->(batch, sq_lngth, self.sq_lngth//2), степень избыточности увеличена
+        rec_proc = self.rnnout2(rec_proc)  #(batch, self.sq_lngth, 32)->(batch, sq_lngth, self.sq_lngth//2), степень избыточности увеличена
         rec_proc = self.denseout(rec_proc)   #полносвязный слой, (batch, self.sq_lngth, self.sq_lngth//2)->(batch, self.sq_lngth, self.sq_lngth//2)
         rec_proc = self.convout2(rec_proc)        #убираем избыточность через свертку->(batch, self.sq_lngth, self.sq_lngth//2)->(batch, sq_lngth, 1)
         rec_proc = tf.squeeze(rec_proc, axis=-1)  #убираем дополнительное измерение (batch, sq_lngth, 1)->(batch, sq_lngth)
