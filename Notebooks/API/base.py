@@ -60,8 +60,8 @@ def read_wav_as_float(file_path):
         #прочесть данные исходного файла как массив значений байтов
         raw_data = wav_file.readframes(n_frames)
 
-    #определить тип данных отдельного семпла на основании количества байт на семпл: 1 байт - np.uint8, 2 байта - np.int16 и т.д.
-    dtype = {1: np.uint8, 2: np.int16, 4: np.int32}.get(sample_width)
+    #определить тип данных отдельного семпла на основании количества байт на семпл: 2 байта - np.int16, 4 байта - np.int32
+    dtype = {2: np.int16, 4: np.int32}.get(sample_width)
     if dtype is None:
         raise ValueError(f"Unsupported sample width: {sample_width}")
 

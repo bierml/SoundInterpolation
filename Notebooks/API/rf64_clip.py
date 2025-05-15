@@ -79,9 +79,7 @@ if __name__ == '__main__':
                 raise ValueError("Data chunk not found in source file")
 
             #сопоставить количеству бит на семпл тип элементов массива dtype
-            if sampwidth == 1:
-                dtype = np.uint8  #обычно беззнаковый тип
-            elif sampwidth == 2:
+            if sampwidth == 2:
                 dtype = np.int16
             elif sampwidth == 4:
                 dtype = np.int32
