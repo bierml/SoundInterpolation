@@ -134,9 +134,7 @@ def read_samples_segment(filename, start_index, end_index):
         num_channels = wf.getnchannels()
         
         #сопоставить количеству бит на семпл тип элементов массива dtype
-        if sample_width == 1:
-            dtype = np.uint8  #обычно беззнаковый тип
-        elif sample_width == 2:
+        if sample_width == 2:
             dtype = np.int16
         elif sample_width == 4:
             dtype = np.int32
