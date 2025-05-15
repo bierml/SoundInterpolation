@@ -81,7 +81,8 @@ if __name__ == '__main__':
         #дополняем массив SQNC_LENGTH//4 семплами из исходного файла в начале (были пропущены по причине того, что мы вставляем семплы из середины каждой последовательности)
         restored_samples_overlap = np.append(np.array(samples_input_file[0:SQNC_LENGTH//4]),restored_samples_overlap)
         #дополнение массива add семплами на конце
-        restored_samples_overlap = np.append(restored_samples_overlap,np.array(samples_input_file[-add:]))
+        if(add>0):
+            restored_samples_overlap = np.append(restored_samples_overlap,np.array(samples_input_file[-add:]))
         #запись результатов восстановления по пути output_path
         write_float_samples_to_wav(restored_samples_overlap, fs, output_path)  
         print(f"WAV file written to {output_path}")
