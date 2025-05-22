@@ -6,15 +6,12 @@
 #include <string.h>
 #include <stdlib.h>
 #include "wave.h"  //заголовочный файл с объявлениями, нужными для работы с WAV-файлами
-#define TRUE 1 
-#define FALSE 0
 
 FILE* ptr;
 FILE* fptr;
 char* filename;
 struct HEADER header;
 
-#define BUFFER_SIZE 20000
 #define SLOPE_LENGTH 4
 //структура для хранения одного канала данных входного файла 
 typedef struct {
@@ -31,7 +28,7 @@ typedef struct {
 
 //прототипы функций, используемых программой, см. описание в месте объявления функций
 void clipfix_process(AudioBuffer* audio, ClipFixParams* params, float peak_level);
-void processBuffer(float* buffer, int bufferLength, float threshold, int slopeLength);
+void processBuffer(float* buffer, int bufferLength, float threshold);
 void interpolate(float* buffer, int t0, int t1, int slopeLength);
 float db_to_linear(float db);
 
@@ -235,7 +232,7 @@ void clipfix_process(AudioBuffer* audio, ClipFixParams* params, float peak_level
 		int chunk_size = (i + params->buffer_size > total_samples)
 			? total_samples - i
 			: params->buffer_size;
-		process_buffer(audio->samples + i, chunk_size, threshold,BUFFER_SIZE);
+		process_buffer(audio->samples + i, chunk_size, threshold);
 	}
 
 	//применить изменение громкости (необходимо для предотвращения клиппинга при восстановлении звука)
