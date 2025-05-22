@@ -107,7 +107,7 @@ if __name__ == '__main__':
                     dbval = random.uniform(clip_thrshd_db_min,clip_thrshd_db_max)
                     clip_threshold = int(db_to_multiplicator(dbval) * full_scale)
                     #принудительное устанавливаем четное количество читаемых байт
-                    to_read = (min(chunk_size, bytes_remaining) // 2) * 2
+                    to_read = min(chunk_size * sampwidth, (bytes_remaining // sampwidth) * sampwidth)
                     raw_chunk = fin.read(to_read)
                     if not raw_chunk:
                         break
