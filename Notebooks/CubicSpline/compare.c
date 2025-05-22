@@ -80,11 +80,11 @@ struct HEADER header2;
 //возвращаемое значение - булево, true - заголовки совпадают, false - заголовки различаются
 bool compare_headers(struct HEADER hd1, struct HEADER hd2) {
 	//для числовых полей сравнение через ==, для строк - проверяем равенство нулю результата strcmp
-	bool res = (strcmp(hd1.riff, hd2.riff) == 0) && (hd1.overall_size == hd2.overall_size) && \
-		(strcmp(hd1.wave, hd2.wave) == 0) && (strcmp(hd1.fmt_chunk_marker, hd2.fmt_chunk_marker) == 0) && \
+	bool res = (strncmp(hd1.riff, hd2.riff, 4) == 0) && \
+		(strncmp(hd1.wave, hd2.wave, 4) == 0) && (strncmp(hd1.fmt_chunk_marker, hd2.fmt_chunk_marker, 4) == 0) && \
 		(hd1.length_of_fmt == hd2.length_of_fmt) && (hd1.format_type == hd2.format_type) && (hd1.channels == hd2.channels) && \
 		(hd1.sample_rate == hd2.sample_rate) && (hd1.byterate == hd2.byterate) && (hd1.block_align == hd2.block_align) && \
-		(hd1.bits_per_sample == hd2.bits_per_sample) && (strcmp(hd1.data_chunk_header, hd2.data_chunk_header) == 0) && (hd1.data_size == hd2.data_size);
+		(hd1.bits_per_sample == hd2.bits_per_sample) && (strncmp(hd1.data_chunk_header, hd2.data_chunk_header, 4) == 0) && (hd1.data_size == hd2.data_size);
 	return res;
 }
 
@@ -121,13 +121,13 @@ int main(int argc, char** argv) {
 	fopen_s(&ptr2, filename2, "rb");
 	if (ptr1 == NULL || ptr2 == NULL) {
 		printf("Error opening file\n");
-		exit(1);
+		return -2;
 	}
 	//samples1 - массив семплов оригинального файла, samples2 - искаженного
 	samples1 = read_file_data(ptr1, &header1);
 	samples2 = read_file_data(ptr2, &header2);
 	if (!compare_headers(header1, header2)) {   //если заголовки не совпадают, сообщить о проблеме и вывести дамп заголовков
-		printf("Given files are not in the same format!\n");
+		printf("Given files are not in the same format(new)!\n");
 		printf("Header 1:\n\t");
 		unsigned char* tmp = &header1;
 		for (int i = 0; i < sizeof(header1); i++) {
@@ -140,7 +140,7 @@ int main(int argc, char** argv) {
 			printf("%02X ", tmp[i]);
 		}
 		printf("\n");
-		exit(1);
+		return -3;
 	}
 	//значения MSE и максимальные по модулю значения семплов в файлах (отдельные для каждого канала)
 	double* mse = (double*)malloc(header1.channels * sizeof(double));
@@ -149,7 +149,7 @@ int main(int argc, char** argv) {
 	double* mse2 = (double*)malloc(header1.channels * sizeof(double));
 	if (mse == NULL || mse1 == NULL || mse2 == NULL || maxs == NULL) {
 		printf("Error in malloc\n");
-		exit(1);
+		return -4;
 	}
 	long num_samples = (8 * header1.data_size) / (header1.channels * header1.bits_per_sample);
 	long real_num_samples = pow(2, ceil(log(num_samples) / log(2)));
@@ -173,7 +173,7 @@ int main(int argc, char** argv) {
 		if (FFT1 == NULL || FFT2 == NULL)
 		{
 			printf("Error in malloc\n");
-			exit(1);
+			return -5;
 		}
 		for (int i = 0; i < num_samples; i++)
 		{
